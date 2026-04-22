@@ -1,0 +1,5 @@
+{"seq":1,"t":"2026-04-22T16:00:00Z","kind":"app_switch","bundle_id":"com.apple.finder","screenshot_ref":"screenshots/0001.png"}
+{"seq":2,"t":"2026-04-22T16:00:10Z","kind":"click","x":600,"y":300,"button":"left","bundle_id":"com.apple.finder","target":{"label":"statement.pdf","role":"file","bundle_id":"com.apple.finder"}}
+{"seq":3,"t":"2026-04-22T16:00:15Z","kind":"key_down","key":"x","modifiers":["cmd"],"bundle_id":"com.apple.finder"}
+{"seq":4,"t":"2026-04-22T16:00:25Z","kind":"click","x":260,"y":400,"button":"left","bundle_id":"com.apple.finder","target":{"label":"Archive","role":"folder","bundle_id":"com.apple.finder"}}
+{"seq":5,"t":"2026-04-22T16:00:40Z","kind":"key_down","key":"v","modifiers":["cmd"],"bundle_id":"com.apple.finder"}

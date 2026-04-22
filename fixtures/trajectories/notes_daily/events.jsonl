@@ -1,0 +1,4 @@
+{"seq":1,"t":"2026-04-22T18:00:00Z","kind":"app_switch","bundle_id":"com.apple.Notes","screenshot_ref":"screenshots/0001.png"}
+{"seq":2,"t":"2026-04-22T18:00:06Z","kind":"click","x":120,"y":120,"button":"left","bundle_id":"com.apple.Notes","target":{"label":"New Note","role":"button","bundle_id":"com.apple.Notes"}}
+{"seq":3,"t":"2026-04-22T18:00:15Z","kind":"text_input","text":"2026-04-22","bundle_id":"com.apple.Notes"}
+{"seq":4,"t":"2026-04-22T18:00:30Z","kind":"text_input","text":"- AM: inbox\n- PM: focus\n- EOD: shutdown ritual","bundle_id":"com.apple.Notes"}

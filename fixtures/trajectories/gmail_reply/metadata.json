@@ -1,0 +1,10 @@
+{
+  "id": "b1a0f6f2-0001-4c00-8000-000000000001",
+  "started_at": "2026-04-22T14:00:00Z",
+  "stopped_at": "2026-04-22T14:00:30Z",
+  "label": "gmail_reply",
+  "display_info": { "width": 2560, "height": 1440, "scale": 2.0 },
+  "app_focus_history": [
+    { "at": "2026-04-22T14:00:00Z", "bundle_id": "com.google.Chrome", "title": "Gmail - Inbox" }
+  ]
+}

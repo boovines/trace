@@ -1,0 +1,10 @@
+{
+  "id": "b1a0f6f2-0003-4c00-8000-000000000003",
+  "started_at": "2026-04-22T16:00:00Z",
+  "stopped_at": "2026-04-22T16:01:00Z",
+  "label": "finder_organize",
+  "display_info": { "width": 2560, "height": 1440, "scale": 2.0 },
+  "app_focus_history": [
+    { "at": "2026-04-22T16:00:00Z", "bundle_id": "com.apple.finder", "title": "Downloads" }
+  ]
+}

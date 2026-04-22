@@ -38,8 +38,9 @@
     },
     "event": {
       "type": "object",
-      "required": ["t", "kind"],
+      "required": ["seq", "t", "kind"],
       "properties": {
+        "seq": { "type": "integer", "minimum": 1, "description": "1-indexed sequence number; unique and strictly increasing within a trajectory." },
         "t": { "type": "string", "format": "date-time" },
         "kind": {
           "type": "string",
@@ -47,11 +48,13 @@
             "mouse_move",
             "mouse_down",
             "mouse_up",
+            "click",
             "scroll",
             "key_down",
             "key_up",
             "text_input",
             "app_focus",
+            "app_switch",
             "screenshot",
             "annotation"
           ]
@@ -66,6 +69,15 @@
         },
         "text": { "type": "string" },
         "bundle_id": { "type": "string" },
+        "target": {
+          "type": "object",
+          "description": "For click events: semantic metadata about what was clicked, used by the synthesizer's destructive-keyword matcher and summary-text generator.",
+          "properties": {
+            "label": { "type": "string" },
+            "role": { "type": "string" },
+            "bundle_id": { "type": "string" }
+          }
+        },
         "screenshot_ref": { "type": "string", "description": "Relative path under screenshots/, e.g. screenshots/0001.png" },
         "note": { "type": "string" }
       }

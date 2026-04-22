@@ -1,0 +1,10 @@
+{
+  "id": "b1a0f6f2-0002-4c00-8000-000000000002",
+  "started_at": "2026-04-22T15:00:00Z",
+  "stopped_at": "2026-04-22T15:00:45Z",
+  "label": "calendar_block",
+  "display_info": { "width": 2560, "height": 1440, "scale": 2.0 },
+  "app_focus_history": [
+    { "at": "2026-04-22T15:00:00Z", "bundle_id": "com.google.Chrome", "title": "Google Calendar" }
+  ]
+}

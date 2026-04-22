@@ -1,0 +1,4 @@
+{"seq":1,"t":"2026-04-22T15:00:00Z","kind":"app_switch","bundle_id":"com.google.Chrome","screenshot_ref":"screenshots/0001.png"}
+{"seq":2,"t":"2026-04-22T15:00:05Z","kind":"click","x":1200,"y":500,"button":"left","bundle_id":"com.google.Chrome","target":{"label":"2:00 PM","role":"cell","bundle_id":"com.google.Chrome"}}
+{"seq":3,"t":"2026-04-22T15:00:12Z","kind":"text_input","text":"Focus block","bundle_id":"com.google.Chrome"}
+{"seq":4,"t":"2026-04-22T15:00:20Z","kind":"click","x":1340,"y":640,"button":"left","bundle_id":"com.google.Chrome","target":{"label":"Save","role":"button","bundle_id":"com.google.Chrome"}}

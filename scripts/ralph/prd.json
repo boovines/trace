@@ -144,7 +144,7 @@
         "pytest passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Depends on R-002 having merged to main. If contracts/trajectory.schema.json has changed since the recorder shipped, update BOTH this reader and the recorder in lockstep — do not fork the schema. Importing the recorder's schema module via the uv workspace is preferred over copying it."
     },
     {

@@ -1,0 +1,5 @@
+{"seq":1,"t":"2026-04-22T17:00:00Z","kind":"app_switch","bundle_id":"com.tinyspeck.slackmacgap","screenshot_ref":"screenshots/0001.png"}
+{"seq":2,"t":"2026-04-22T17:00:04Z","kind":"click","x":140,"y":80,"button":"left","bundle_id":"com.tinyspeck.slackmacgap","target":{"label":"Avatar","role":"button","bundle_id":"com.tinyspeck.slackmacgap"}}
+{"seq":3,"t":"2026-04-22T17:00:09Z","kind":"click","x":220,"y":160,"button":"left","bundle_id":"com.tinyspeck.slackmacgap","target":{"label":"Set a status","role":"menuitem","bundle_id":"com.tinyspeck.slackmacgap"}}
+{"seq":4,"t":"2026-04-22T17:00:15Z","kind":"text_input","text":":dart: heads down","bundle_id":"com.tinyspeck.slackmacgap"}
+{"seq":5,"t":"2026-04-22T17:00:22Z","kind":"click","x":820,"y":540,"button":"left","bundle_id":"com.tinyspeck.slackmacgap","target":{"label":"Save","role":"button","bundle_id":"com.tinyspeck.slackmacgap"}}
