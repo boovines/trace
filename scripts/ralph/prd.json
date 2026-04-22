@@ -172,7 +172,7 @@
         "pytest passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "This is where 'does synthesis fit in context' is actually decided. Err toward including more clicks over more screenshots — clicks are the semantic backbone, screenshots are context. A 10-minute recording should digest down to < 100k input tokens before screenshots, comfortably within Sonnet's context."
     },
     {
