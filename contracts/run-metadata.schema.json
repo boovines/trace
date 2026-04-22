@@ -2,30 +2,93 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://trace.local/contracts/run-metadata.schema.json",
   "title": "RunMetadata",
-  "description": "Shape of run_metadata.json produced by the Runner.",
+  "description": "Shape of run_metadata.json produced by the Trace Runner for a single run invocation.",
   "type": "object",
-  "required": ["run_id", "skill_slug", "skill_version", "started_at", "status", "parameters", "dry_run"],
+  "additionalProperties": false,
+  "required": [
+    "run_id",
+    "skill_slug",
+    "started_at",
+    "ended_at",
+    "status",
+    "mode"
+  ],
   "properties": {
-    "run_id": { "type": "string", "format": "uuid" },
-    "skill_slug": { "type": "string" },
-    "skill_version": { "type": "string" },
-    "started_at": { "type": "string", "format": "date-time" },
-    "finished_at": { "type": "string", "format": "date-time" },
+    "run_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "UUIDv4 assigned by the runner at run creation."
+    },
+    "skill_slug": {
+      "type": "string",
+      "description": "Slug of the skill being executed; must match the skill directory name."
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp the run began."
+    },
+    "ended_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp the run reached a terminal status, or null while still in progress."
+    },
     "status": {
       "type": "string",
-      "enum": ["running", "awaiting_confirmation", "completed", "aborted", "failed"]
+      "enum": [
+        "pending",
+        "running",
+        "awaiting_confirmation",
+        "succeeded",
+        "failed",
+        "aborted",
+        "budget_exceeded",
+        "rate_limited"
+      ]
     },
-    "dry_run": { "type": "boolean" },
+    "mode": {
+      "type": "string",
+      "enum": ["execute", "dry_run"],
+      "description": "execute drives real CGEventPost input; dry_run only simulates."
+    },
     "parameters": {
       "type": "object",
-      "additionalProperties": true
+      "description": "Flat string-keyed map of parameter names to the values supplied by the caller.",
+      "additionalProperties": {
+        "type": "string"
+      }
     },
-    "abort_reason": { "type": "string" },
-    "token_usage": {
-      "type": "object",
-      "properties": {
-        "input": { "type": "integer", "minimum": 0 },
-        "output": { "type": "integer", "minimum": 0 }
+    "final_step_reached": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "total_cost_usd": {
+      "type": "number",
+      "minimum": 0
+    },
+    "abort_reason": {
+      "type": ["string", "null"]
+    },
+    "input_tokens_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "output_tokens_total": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "error_message": {
+      "type": ["string", "null"]
+    },
+    "confirmation_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "destructive_actions_executed": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 0
       }
     }
   }

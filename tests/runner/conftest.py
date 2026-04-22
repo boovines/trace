@@ -16,7 +16,6 @@ from collections.abc import Iterator
 
 import pytest
 import respx
-
 from runner.safety import LIVE_MODE_ENV_VAR
 
 

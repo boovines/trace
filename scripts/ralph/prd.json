@@ -105,7 +105,7 @@
         "pytest passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Locked once shipped. Keep additionalProperties:false on the top level — catches typos like 'cost_usd' vs 'total_cost_usd' that would otherwise silently drift."
     },
     {

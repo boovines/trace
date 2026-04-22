@@ -8,6 +8,9 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - Safety gate: every live-mode code path must call `runner.safety.require_live_mode()` in `__init__`. The gate is strict string equality against `TRACE_ALLOW_LIVE="1"` — `"true"`, `"yes"`, `"0"`, etc. all disable live mode. `tests/runner/conftest.py` autouses a fixture that force-unsets the flag before every test; opt in with the `live_mode_allowed` fixture.
 - Tests mock Anthropic via `respx` (see `anthropic_mock` fixture) — never hit the real API.
 - Gateway (`gateway/main.py`) imports the runner as `from runner.api import router` (installed-package style via the pytest pythonpath). Synthesizer/recorder are still on the flat layout and import via `from services.{name}.{name}.api` — those packages will switch to src layout when their respective branches reach X-001-equivalent stories.
+- JSON schemas in `contracts/` are the on-disk contract; the runner pairs each with a pydantic model in `runner.schema` (e.g. `RunMetadata`) for typed in-memory use. Both must agree — `extra="forbid"` on the model mirrors `additionalProperties: false` on the schema. Round-tripping uses `model_dump(mode="json", exclude_unset=True)` so unset optional fields do not leak back as nulls.
+- Pydantic v2 serializes UTC datetimes with a trailing `Z` (not `+00:00`) via `mode="json"`. Tests that assert round-trip identity must store the canonical `Z` form in fixtures.
+- `types-jsonschema` is in the shared dev extras so mypy --strict accepts `jsonschema` imports without module-level overrides.
 
 ---
 
@@ -27,4 +30,18 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - `uv sync` without `--extra dev` **removes** pytest/mypy/ruff. Always run with `--extra dev --extra macos` locally; the Ralph script should do the same.
   - `LIVE_MODE_ENV_VAR` is exported from `runner.safety` as the single source of truth for the env-var name — do NOT hard-code `"TRACE_ALLOW_LIVE"` string literals elsewhere; import the constant.
   - The three other service packages (recorder, synthesizer, gateway) still use the flat layout. Importing across modules (e.g., runner depending on synthesizer's `skill_doc` in X-004) will require either (a) moving synthesizer to src layout too, or (b) adding `services/synthesizer/synthesizer` to `pythonpath`. Decide at X-004 time.
+---
+
+## 2026-04-22 - X-002 - run_metadata.json JSON schema and model
+- Rewrote `contracts/run-metadata.schema.json` as draft-2020-12 with `additionalProperties: false`, required fields `{run_id, skill_slug, started_at, ended_at, status, mode}`, and all the optional fields enumerated in the PRD. The pre-existing placeholder schema had different required fields (`skill_version`, `dry_run`) and no `additionalProperties` guard — replaced wholesale.
+- Added `services/runner/src/runner/schema.py` exposing `load_run_metadata_schema()`, `validate_run_metadata()`, and the `RunMetadata` pydantic model with `from_dict` / `to_dict` / `is_terminal` / `is_waiting`. Also exported the `TERMINAL_STATUSES` frozenset and `WAITING_STATUS` sentinel so other modules import from the single source of truth.
+- Added `tests/runner/test_schema.py` — 77 cases covering valid examples, 12 malformed cases across both the JSON schema and the pydantic model, round-trip identity, unset-field drop behavior, terminal/waiting status matrix, and schema required-fields sanity.
+- Added `types-jsonschema` to both the root and services/runner dev extras so mypy --strict accepts `jsonschema` imports.
+- Quality gates: `uv run ruff check services/runner tests/runner` clean; `uv run mypy --strict services/runner` clean (5 source files); `uv run pytest tests/runner/` → 77 passed.
+- **Learnings for future iterations:**
+  - Pydantic v2's `model_dump(mode="json")` outputs UTC datetimes with a `Z` suffix, not `+00:00`. Round-trip-identity tests must use `Z` in the canonical input. If a downstream consumer needs `+00:00` we'd have to add a `@field_serializer`, but nothing requires that today.
+  - Pydantic v2 in lax mode accepts integers as Unix timestamps for `datetime` fields, so a malformed test like `started_at=12345` will NOT fail. Use a dict or list (`{"not": "a date"}`) to force a type error.
+  - The JSON schema uses `minimum: 0` on numeric fields (tokens, cost, final_step_reached, confirmation_count). Mirror that on the pydantic side with `Field(ge=0)` — the two layers must agree or a hand-edited file can pass one validator and fail the other.
+  - The schema path resolves from `Path(__file__).resolve().parents[4]` (4 ups from `services/runner/src/runner/schema.py` gets to repo root). If the runner moves deeper into the tree, update the parents index.
+  - `@lru_cache(maxsize=1)` on `load_run_metadata_schema` and `_validator` avoids re-reading the schema on every run_metadata.json write, which RunWriter (X-005) will do constantly.
 ---
