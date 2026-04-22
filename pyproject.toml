@@ -57,4 +57,5 @@ testpaths = ["tests"]
 pythonpath = ["services/runner/src", "services/synthesizer"]
 markers = [
     "macos: test requires a real macOS main display (skipped in CI and Ralph iterations)",
+    "live_input: test posts real events via CGEventPost; skipped unless --run-live-input is passed",
 ]

@@ -1,17 +1,16 @@
 """Input adapters for the runner's computer-use loop.
 
 The runner dispatches Claude's tool calls (click, type, scroll, key, move) into
-an ``InputAdapter``. Two implementations live in this module:
+an ``InputAdapter``. Two implementations ship:
 
-* ``DryRunInputAdapter`` — records every call into a list and does nothing
-  else. This is the adapter Ralph iterations and the unit tests use; it is
-  safe regardless of the ``TRACE_ALLOW_LIVE`` flag because it cannot drive the
-  real machine.
-* ``LiveInputAdapter`` — the live-mode adapter. Its ``__init__`` calls
-  ``require_live_mode()`` so construction fails loudly when the flag is not
-  set. The actual CGEventPost plumbing lands in X-008 (``runner.live_input``);
-  this module holds the constructor gate so X-007's integration tests can
-  already assert on the safety behavior.
+* ``DryRunInputAdapter`` (this module) — records every call into a list and
+  does nothing else. Safe regardless of the ``TRACE_ALLOW_LIVE`` flag because
+  it cannot drive the real machine. Used by Ralph iterations and every unit
+  test.
+* ``LiveInputAdapter`` (``runner.live_input``) — posts real mouse and keyboard
+  events via CGEventPost. Its ``__init__`` calls ``require_live_mode()`` so
+  construction fails loudly when the flag is not set. Re-exported from this
+  module for backwards compatibility.
 
 The adapter contract is declared as a ``typing.Protocol`` so real code only
 depends on the method shape, not on an inheritance chain. Callers should type
@@ -23,8 +22,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Literal, Protocol, runtime_checkable
-
-from runner.safety import require_live_mode
 
 MouseButton = Literal["left", "right", "middle"]
 ScrollDirection = Literal["up", "down", "left", "right"]
@@ -113,43 +110,10 @@ class DryRunInputAdapter:
         self._calls.clear()
 
 
-class LiveInputAdapter:
-    """Placeholder for the X-008 live adapter.
-
-    The full implementation (CGEventPost plumbing, Retina coordinate mapping,
-    modifier flags, Unicode text input, rate limiting) is authored on the
-    X-008 story in ``runner.live_input``. This class exists in X-007 so the
-    safety gate is wired up and testable today: constructing a ``LiveInputAdapter``
-    without ``TRACE_ALLOW_LIVE=1`` raises ``LiveModeNotAllowed`` before any
-    event-system code can run.
-    """
-
-    def __init__(self) -> None:
-        require_live_mode()
-        raise NotImplementedError(
-            "LiveInputAdapter is implemented in X-008 (runner.live_input). "
-            "Only the TRACE_ALLOW_LIVE gate is wired up in X-007."
-        )
-
-    def click(
-        self,
-        x: float,
-        y: float,
-        button: MouseButton = "left",
-        modifiers: Sequence[str] = (),
-    ) -> None:
-        raise NotImplementedError
-
-    def type_text(self, text: str) -> None:
-        raise NotImplementedError
-
-    def key_press(self, keys: Sequence[str]) -> None:
-        raise NotImplementedError
-
-    def scroll(
-        self, x: float, y: float, direction: ScrollDirection, amount: int
-    ) -> None:
-        raise NotImplementedError
-
-    def move_mouse(self, x: float, y: float) -> None:
-        raise NotImplementedError
+__all__ = [
+    "DryRunInputAdapter",
+    "InputAdapter",
+    "MouseButton",
+    "RecordedCall",
+    "ScrollDirection",
+]

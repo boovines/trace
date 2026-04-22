@@ -1,4 +1,4 @@
-"""Tests for :mod:`runner.input_adapter` — dry-run recorder and live gate.
+"""Tests for :mod:`runner.input_adapter` — dry-run recorder contract.
 
 ``DryRunInputAdapter`` is the adapter Ralph iterations use; every test should
 confirm that method calls are recorded with exact shape and order but that
@@ -6,21 +6,16 @@ nothing is posted to the real event system (there is nothing to observe on
 that side — its absence is verified at the contract level by never importing
 PyObjC from this module).
 
-``LiveInputAdapter`` is only exercised here to lock down the safety gate:
-instantiating it without ``TRACE_ALLOW_LIVE=1`` must raise
-``LiveModeNotAllowed`` **before** any CGEventPost code can run. The full
-live-mode behavior is covered by X-008.
+The live adapter's safety gate and CGEventPost plumbing are covered in
+``test_live_input.py``.
 """
 
 from __future__ import annotations
 
-import pytest
 from runner.input_adapter import (
     DryRunInputAdapter,
     InputAdapter,
-    LiveInputAdapter,
 )
-from runner.safety import LiveModeNotAllowed
 
 
 def test_dry_run_adapter_satisfies_protocol() -> None:
@@ -129,18 +124,3 @@ def test_adapter_is_reusable_after_clear() -> None:
     assert adapter.get_recorded_calls() == [("type_text", ("second life",), {})]
 
 
-def test_live_adapter_raises_without_flag() -> None:
-    with pytest.raises(LiveModeNotAllowed) as exc:
-        LiveInputAdapter()
-    assert "TRACE_ALLOW_LIVE" in str(exc.value)
-
-
-def test_live_adapter_raises_not_implemented_with_flag(
-    live_mode_allowed: None,
-) -> None:
-    _ = live_mode_allowed  # fixture sets TRACE_ALLOW_LIVE=1 via monkeypatch
-    # The X-007 stub lets the gate pass but still refuses to drive the machine;
-    # X-008 replaces the body with the real CGEventPost plumbing.
-    with pytest.raises(NotImplementedError) as exc:
-        LiveInputAdapter()
-    assert "X-008" in str(exc.value)

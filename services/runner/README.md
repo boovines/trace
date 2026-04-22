@@ -41,6 +41,27 @@ Any test or code path that constructs a `LiveInputAdapter` or
 `@pytest.mark.live_input` — both opt-ins must be explicit. Run these tests only
 on a disposable test machine, never on a production workstation.
 
+### Live input tests (`@pytest.mark.live_input`)
+
+Tests that actually drive `CGEventPost` live through the HID tap are marked
+`@pytest.mark.live_input` and are **skipped unless** `--run-live-input` is
+passed to pytest:
+
+```bash
+# Normal runs (Ralph, CI, local TDD) — live tests are skipped.
+uv run pytest tests/runner/
+
+# Opt-in live run — do this only on a disposable test machine with no
+# production data or credentials, and with Accessibility permission granted
+# to the Python interpreter. You will see real mouse/keyboard events fire.
+TRACE_ALLOW_LIVE=1 uv run pytest tests/runner/test_live_input.py \
+    --run-live-input -m live_input
+```
+
+Never combine `--run-live-input` with a production environment or a shell
+that has real API keys in it — the tests post synthetic clicks at arbitrary
+screen coordinates.
+
 ## Contracts
 
 - Reads [skill-meta.schema.json](../../contracts/skill-meta.schema.json)

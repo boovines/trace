@@ -282,7 +282,7 @@
         "pytest passes (skipping the @pytest.mark.live_input tests by default)"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "The CGEventPost API uses POINTS, not pixels — this is why X-006 exists. Ralph iterations will NEVER run the @pytest.mark.live_input tests because they require the TRACE_ALLOW_LIVE flag, which Ralph's prompt forbids. Human live testing (X-025) is where these get exercised."
     },
     {
