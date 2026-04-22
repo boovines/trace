@@ -55,3 +55,6 @@ ignore_missing_imports = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["services/runner/src", "services/synthesizer"]
+markers = [
+    "macos: test requires a real macOS main display (skipped in CI and Ralph iterations)",
+]

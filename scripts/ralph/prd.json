@@ -224,7 +224,7 @@
         "pytest passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "THIS IS THE SINGLE MOST FAILURE-PRONE PART OF THE MODULE. Retina off-by-2x errors are the single most likely class of bug — get the tests right here or misclicks will be a mystery later. The 1568px target longest-edge is Anthropic's documented recommendation for computer use."
     },
     {
