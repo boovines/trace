@@ -92,7 +92,7 @@
         "pytest passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "The seq counter must be thread-safe — event tap runs on a background thread and text aggregator runs on the main thread, they both append events."
     },
     {

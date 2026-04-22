@@ -16,6 +16,10 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **Schema validation**: `recorder.schema` exposes `validate_event(event)` / `validate_metadata(meta)` backed by `jsonschema`'s Draft 2020-12 validator (with `FORMAT_CHECKER` enabled for `uuid`/`date-time`). Future writer/session code should call these before writing JSON to disk so bad events never land in `events.jsonl`.
 - **Schema file lookup**: `recorder.schema.find_schema_path()` walks up from `__file__` to find `contracts/trajectory.schema.json`. Works for the uv-workspace editable install. If the contracts ever move or get bundled into the wheel, update this function — do NOT hardcode a path.
 - **Local `$ref` only**: the `load_event_schema()` / `load_metadata_schema()` wrappers build standalone schemas with a `#/$defs/...` fragment ref (no `$id`), which keeps `jsonschema` from trying to HTTP-fetch the schema's `$id` URL at validate time. If you add new top-level sub-schemas for Synthesizer/Runner to reuse, follow the same pattern.
+- **TrajectoryWriter ownership**: `recorder.writer.TrajectoryWriter` is the only module allowed to mutate the on-disk trajectory directory. All writes go through its lock; session/orchestrator code must not write `events.jsonl` / `metadata.json` / `screenshots/*` directly. It validates via `recorder.schema.validate_{event,metadata}` BEFORE any disk write, so bad data never leaks to disk. The constructor creates `<root>/<uuid>/` + `screenshots/` with perms `0700` and the writer is usable as a context manager (`__exit__` calls `close()`).
+- **Atomic JSON writes**: `_atomic_write_json(path, data)` writes to `<path>.tmp`, fsyncs, and renames. Use it for any metadata-style file. `events.jsonl` is append-flush (no fsync per line — documented v1 tradeoff).
+- **Datetime import style**: use `from datetime import UTC, datetime` (Python 3.11+). Ruff's `UP017` flags `timezone.utc` — don't revive it. ISO strings are produced with `datetime.now(UTC).isoformat(timespec="milliseconds")` which yields `+00:00` suffixes; the schema's `format: date-time` accepts both `+00:00` and `Z`.
+- **Ruff SIM105**: prefer `with contextlib.suppress(OSError): os.fsync(...)` over `try/except/pass` for best-effort fsync on filesystems that don't support it (tmpfs in pytest tmp_path).
 
 ---
 
@@ -57,4 +61,26 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - If a sub-schema you build at runtime has an `$id` pointing at a non-resolvable URL (e.g. `https://trace.local/...`) and a `$ref` of the same URL, the `referencing` resolver will try to HTTP-fetch it and explode with `URLError`. Use a bare `#/$defs/...` fragment ref (no `$id`) to keep resolution purely local.
   - For `oneOf` failures, the top-level `ValidationError.message` is the generic "not valid under any of the given schemas" — the specific field-level errors live in `err.context`. Tests asserting a specific needle must walk `.context` recursively (see `_collect_error_text` in `test_schema.py`).
   - When Ralph adds R-003's writer, it should call `schema.validate_event` BEFORE `events.jsonl.write(...)` — that's the cheapest way to make "writing schema-invalid data" impossible at the module boundary.
+---
+
+## 2026-04-22 - R-003
+- Added `services/recorder/src/recorder/writer.py` exposing `TrajectoryWriter` with constructor that mints a uuid, creates `<root>/<uuid>/` + `screenshots/` at perms `0700`, and opens `events.jsonl` for append.
+- `write_metadata(metadata)` validates via `recorder.schema.validate_metadata`, then writes atomically (`.tmp` → fsync → rename) and caches the dict so `close()` can finalise `stopped_at`.
+- `append_event(event)` assigns `seq` if missing (or `None`), validates, JSON-encodes one line, flushes. A single `threading.Lock` guards seq assignment + file write so the CGEventTap background thread and the main-thread text aggregator can share a writer. The counter is kept strictly ahead of any caller-supplied seq so auto-assigned seqs never collide with pre-assigned ones.
+- `write_screenshot(seq, png_bytes)` writes `screenshots/NNNN.png` (4-digit zero-padded, extends past 4 digits for large seqs — the schema pattern allows `\d{4,}`).
+- `close()` flushes the events handle, sets `stopped_at` on metadata (reading from disk if the cached copy is absent), re-validates, and rewrites atomically. Idempotent — second `close()` is a no-op — and further `append_event` raises `RuntimeError`.
+- Also added `__enter__`/`__exit__` so the writer can be used as a context manager.
+- `tests/recorder/test_writer.py` (11 tests): directory layout + perms, duplicate-id guard, round-trip with 10 events + 3 screenshots, bad-payload rejection without disk leak, bad metadata rejection, 5×20 concurrent append with distinct monotonic seq, caller-supplied seq preservation + counter advance, idempotent close, zero-padded filename for small and 5-digit seqs, close-without-metadata safety, context-manager exit.
+- Files changed:
+  - `services/recorder/src/recorder/writer.py` (new)
+  - `tests/recorder/test_writer.py` (new)
+  - `scripts/ralph/prd.json` (R-003 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (35 tests total).
+- **Learnings for future iterations:**
+  - `datetime.now(timezone.utc)` trips ruff `UP017` on Python 3.11+ — use `from datetime import UTC` and `datetime.now(UTC)`.
+  - `tmp.replace(final)` on POSIX is atomic and works cross-device on the same filesystem; it's the right primitive for "write then swap into place".
+  - `Path.with_suffix(".png.tmp")` is wrong for multi-dot suffixes (replaces the existing `.png`). Use `path.with_name(path.name + ".tmp")` to append a suffix safely.
+  - When assigning `seq` before validating, copy the dict (`dict(event)`) so validation failures don't mutate the caller's input — this matters for the session orchestrator that may retry or re-route a rejected event.
+  - The writer's `_lock` is coarse (guards both the counter and the file handle). That's fine for the expected event rate (well under 1k events/sec); if we ever need finer granularity, split into a `seq_lock` + `write_lock` — but beware of ordering: the on-disk order must match seq order for tests and for downstream Synthesizer consumption.
+  - `close()` reading the metadata from disk as a fallback means that even if a test calls `close()` without ever calling `write_metadata()`, we don't crash — we just skip the `stopped_at` finalisation. The orchestrator should always call `write_metadata()` first, but the writer defends against the bad ordering.
 ---
