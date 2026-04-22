@@ -18,6 +18,7 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - SKILL.md format (locked by X-004 parser): a `# Title` line, a `## Steps` section whose body is `N. text` lines (1-based, contiguous). Destructive steps begin with `⚠️ ` (fully qualified) or `⚠ ` (bare). The parser strips the marker from `.text` and sets `destructive=True`. Prose between title and `## Steps` is ignored but preserved on disk.
 - Skill meta/markdown semantic check lives in `synthesizer.schema.validate_meta_against_markdown` — it enforces that `meta.destructive_steps` is exactly the set of `⚠️`-marked step numbers (symmetric: either-direction drift is an error).
 - Parameter substitution: `meta.parameters[*]` is the declaration. A parameter is required iff it has NO `default` key at all OR `default` is `null`. Unknown parameters from the caller raise `UnknownParameterError`. Escaped braces `\{` / `\}` survive substitution as literal `{` / `}`. Non-string defaults (e.g. integer `30`) are stringified via `str()` before substitution.
+- Atomic metadata writes: `runner.run_writer._atomic_write_bytes` uses `os.open` + `os.write` + `os.fsync` + `os.replace` with a `.tmp` sibling, then removes the tmp on any exception. Always patch `runner.run_writer.os.fsync` (not `os.fsync`) in tests so the module-local reference is intercepted. `update_status` re-runs pydantic validation via `model_dump() | updates → model_validate` — `model_copy(update=...)` does NOT re-validate and will happily accept a bogus status enum.
 
 ---
 
@@ -82,4 +83,19 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - `replace_step_text` helper exists in `synthesizer.skill_doc` because `SkillStep` is frozen — callers performing substitution must use it or `dataclasses.replace` rather than mutating.
   - `default: null` in skill.meta.json is treated as "no default" (i.e. required). Otherwise JSON serialization of undefined values could silently change required-ness.
   - `_VALID_MD` in test_skill_loader.py uses `meta = _valid_meta() | {"destructive_steps": []}` to override the default destructive set for "no marker" tests — `dict | dict` is Python 3.9+ syntax and works cleanly for meta overrides.
+---
+
+## 2026-04-22 - X-005 - Run artifact writer with atomic metadata updates and screenshot storage
+- Added `services/runner/src/runner/run_writer.py` exposing `RunWriter` (thread-safe via a single `RLock`) with `write_metadata`, `update_status`, `append_event`, `append_transcript`, `write_screenshot`, `close`, and a context-manager protocol. Also exported `get_run_dir_perms` as a tiny test helper.
+- Atomic metadata writes use `os.open` + `os.write` + `os.fsync` + `os.replace` with a `.tmp` sibling and unlink-on-exception to guarantee no stray tmp files after a mid-write crash. The metadata fast-path short-circuits when the serialized bytes match the last successful write — same-contents `write_metadata` is a true no-op, preserving mtime.
+- `update_status` reconstructs the model via `model_dump() | updates` → `RunMetadata.model_validate(...)` so a bad status enum fails loudly. `model_copy(update=...)` does NOT re-validate in pydantic v2 and would have silently accepted nonsense.
+- Screenshot writer validates the PNG magic bytes `89 50 4E 47 0D 0A 1A 0A` before writing, rejects negative seq, and zero-pads to 4 digits via `_screenshot_filename`.
+- Run directory is created with mode `0o700` (matching the safety invariant) and an `os.chmod` after `mkdir` — `Path.mkdir(mode=...)` honors umask, so an explicit chmod is required.
+- Added `tests/runner/test_run_writer.py` — 16 cases covering: directory perms 0o700, full lifecycle (10 events + 5 screenshots + 3 transcript turns), metadata idempotency, runid/slug/mode mismatch → ValueError, invalid status enum → ValidationError, concurrent append from 3 threads producing 30 monotonic-seq events, simulated `fsync` failure (patched at `runner.run_writer.os.fsync`) leaves no `.tmp` file AND preserves prior metadata, PNG magic rejection, negative seq rejection, zero-padding, `close()` idempotency, context-manager, individual JSONL line parseability, transcript content-block preservation.
+- Quality gates: `uv run ruff check services/runner tests/runner` clean; `uv run mypy --strict services/runner` clean (8 source files); `uv run pytest tests/runner/` → 174 passed (16 new); `scripts/check_contracts.sh` ok.
+- **Learnings for future iterations:**
+  - Pydantic v2: `model_copy(update=...)` does NOT re-run field validators. To enforce schema integrity when mutating a RunMetadata, use `model_validate(model_dump() | updates)` instead.
+  - `os.fsync` is imported into `runner.run_writer` at module level for atomic writes. Tests that want to simulate a fsync failure MUST patch `runner.run_writer.os.fsync` (the module-local reference), not `os.fsync` globally — otherwise the patch won't intercept.
+  - `Path.mkdir(mode=0o700)` is subject to the process umask; always follow with an explicit `os.chmod(path, 0o700)` to guarantee the perms actually land on disk.
+  - Minimal valid PNG bytes for tests: 8-byte signature + IHDR + IDAT + IEND chunks — about 67 bytes total. Stored inline in the test module to avoid shipping a fixture file just for the happy path.
 ---

@@ -196,7 +196,7 @@
         "pytest passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Atomic writes matter here because a crashed run's metadata must still be readable — we show it as 'aborted' or 'failed' in the UI. Partial writes that corrupt the metadata file would orphan runs."
     },
     {
