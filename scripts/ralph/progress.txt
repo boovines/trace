@@ -31,6 +31,9 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **NSDictionary dual-access**: `userInfo()` on an `NSNotification` is bridged to a Python dict in most PyObjC builds but not all. Accept both by trying `.get(key)` first (callable on a bridged dict) and falling back to `objectForKey_(key)` on an ObjC-only stub. Same pattern applies to any NSDictionary the recorder reads out of a framework callback.
 - **Idle-flush timer pattern**: for any module that aggregates into a buffer until a "nothing happened for N seconds" signal, use a `threading.RLock` around the state + a `threading.Timer` that is cancelled-and-replaced on every ingest event. The RLock (not a plain Lock) is required because the Timer's callback may take the lock while a caller-driven `flush()` is mid-flight. The Timer callback should also check an `is_stopped` flag so a late-firing cancelled timer is a silent no-op. `text_aggregator.py` is the reference.
 - **Session-layer translation of event_tap output**: `recorder.event_tap` emits modifier names in PyObjC framework style (`"command"`, `"control"`, `"option"`, …). The trajectory schema's `modifier` enum uses short forms (`"cmd"`, `"ctrl"`, `"opt"`, …). Translation happens in the session orchestrator (R-010) when shaping a schema-valid `keypress` event. Downstream consumers of event_tap (text_aggregator, session) must agree on which name style they expect — currently everything inside the recorder uses the long PyObjC names; ONLY the session's final schema-event builder maps to the short enum.
+- **Stateless policy modules**: `recorder.keyframe_policy.KeyframePolicy` is stateless — the session passes `(event_type, seconds_since_last_keyframe)` each call and the policy answers yes/no + reason. The session owns the "time since last keyframe" state and the periodic timer. Prefer this shape for any future rule-based gate (e.g. scroll-debounce) — stateless is easier to test, thread-safe by construction, and doesn't couple the rule to a particular timer impl.
+- **Class-level state in PyObjC test doubles**: when emulating the `cls.alloc().init…_(…)` two-step idiom, do NOT use mutable class attributes at the base class (RUF012). Either put state on the instance, or declare `ClassVar[...]` explicitly, or create a fresh subclass per test via `type("Name", (Base,), {...})` — the screenshot stub uses the subclass trick so each test's `rep_calls` list is isolated.
+- **PNG validation without Pillow**: the `recorder.screenshot` module exposes `PNG_MAGIC = b"\\x89PNG\\r\\n\\x1a\\n"` and rejects bytes that don't start with it. Tests synthesize a minimal valid PNG by hand (magic + IHDR + one compressed IDAT + IEND, with `zlib.crc32` for the per-chunk CRC) — avoid adding Pillow just to verify PNG shape. Dimension parsing uses `struct.unpack(">II", png[16:24])` once you've asserted `png[12:16] == b"IHDR"`.
 
 ---
 
@@ -239,4 +242,42 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - When cancelling a Timer via `t.cancel()`, a race is still possible — the Timer may have already crossed the "actually fire" threshold before cancel runs. Defensive pattern: the `_on_idle` handler checks `self._stopped` and acquires the lock before doing anything. If a late-firing timer lands after `stop()`, it's just a no-op.
   - Re-focusing the SAME (app, field_key) must NOT flush — the session orchestrator will re-call `set_focus` opportunistically (e.g., after every click, which may re-resolve the same focused field). If re-focus flushed, text mid-sentence would be prematurely split into two text_input events.
   - The synthetic `app:<bundle_id>` fallback key is deliberately distinct from any real AX identifier — a real AX identifier will never contain a colon-prefixed "app:" segment that matches a bundle id. If that ever collides in practice, hash the bundle id instead.
+---
+
+## 2026-04-22 - R-009
+- Added `services/recorder/src/recorder/screenshot.py` exposing `capture_main_display() -> bytes | None`, `get_main_display_info() -> DisplayInfo | None`, and a public `PNG_MAGIC` sentinel.
+  - `capture_main_display()` calls `Quartz.CGWindowListCreateImage(CGRectInfinite, kCGWindowListOptionOnScreenOnly, kCGNullWindowID, kCGWindowImageDefault)` and encodes the resulting CGImage via `AppKit.NSBitmapImageRep.alloc().initWithCGImage_(…).representationUsingType_properties_(4, None)` — `4` is `NSBitmapImageFileTypePNG`. Every framework step is wrapped in try/except and logged at warning level; the function never raises past the module boundary.
+  - Guards against: missing `Quartz`/`AppKit` imports, absent `kCGWindow*` sentinels, `CGWindowListCreateImage` returning None (Screen Recording denial), `NSBitmapImageRep.initWithCGImage_` returning None, a non-PNG byte result (final magic-prefix sanity check).
+  - `get_main_display_info()` uses `AppKit.NSScreen.mainScreen().frame()` (points) + `backingScaleFactor()` (Retina) — returns `None` if either is unreadable or non-positive. This is what `metadata.json.display_info` will be seeded from by the session orchestrator (R-010).
+- Added `services/recorder/src/recorder/keyframe_policy.py` exposing `KeyframePolicy` + `PERIODIC_INTERVAL_SECONDS=5.0` / `POST_CLICK_DELAY_SECONDS=0.1` / `KEYFRAME_REASONS` constants.
+  - Stateless decision gate: `should_capture(event_type, seconds_since_last_keyframe) -> bool` + `reason_for(…) -> str | None`. The caller (session orchestrator) tracks wall-clock + timer; policy just answers yes/no + canonical reason.
+  - Triggers: `"tick"` → `"periodic"` iff elapsed >= 5s; `"app_switch"` / `"pre_click"` / `"post_click"` → always capture with that reason; anything else → no.
+  - Constructor validates `periodic_interval_seconds > 0` and `post_click_delay_seconds >= 0` so a misconfigured session can't silently disable periodic keyframes.
+- Added `tests/recorder/test_screenshot.py` (17 hermetic + 1 opt-in macOS):
+  - Happy path round-trips a synthesised 8x8 PNG through stubbed Quartz+AppKit; asserts canonical `CGWindowListCreateImage` args + `NSBitmapImageRep.representationUsingType_properties_(4, None)` call.
+  - Error branches: `Quartz` missing (`sys.modules["Quartz"] = None` → ImportError), `AppKit` missing, `CGWindowListCreateImage` returning None, `CGWindowListCreateImage` raising, sentinels missing, bitmap init returning None, bitmap returning no PNG data, bitmap returning non-PNG bytes.
+  - `get_main_display_info`: Retina (2.0 scale), non-Retina (1.0), NSScreen=None, AppKit ImportError, `frame()` raising, zero-width dims, zero scale factor.
+  - `@pytest.mark.macos test_macos_real_capture_produces_valid_png` captures the real main display, parses the IHDR chunk, and asserts pixel dims ≈ `display_info.width * scale_factor` within 1 pixel of slack (Retina sanity).
+- Added `tests/recorder/test_keyframe_policy.py` (21 tests):
+  - Defaults + schema-enum pin (`KEYFRAME_REASONS` matches the payload enum).
+  - Constructor validation rejects non-positive intervals and negative post-click delay.
+  - Periodic: fires at 5.0s exactly, exceeds, stays quiet below threshold, at zero; custom 1.0s interval respected.
+  - `app_switch` / `pre_click` / `post_click` fire unconditionally (elapsed-agnostic).
+  - Unknown event_types (`click`, `keypress`, `scroll`, `text_input`, `window_focus`, `tap_reenabled`, empty string, wrong-case `"TICK"`) all return False.
+- Files changed:
+  - `services/recorder/src/recorder/screenshot.py` (new)
+  - `services/recorder/src/recorder/keyframe_policy.py` (new)
+  - `tests/recorder/test_screenshot.py` (new)
+  - `tests/recorder/test_keyframe_policy.py` (new)
+  - `scripts/ralph/prd.json` (R-009 passes=true)
+  - `scripts/ralph/progress.txt` (added stateless-policy + PyObjC-ClassVar + Pillow-free PNG patterns)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (184 passed, 4 skipped — the opt-in macOS tests for event_tap, ax_resolver, focus_tracker, screenshot).
+- **Learnings for future iterations:**
+  - `CGWindowListCreateImage` returning non-None does NOT mean Screen Recording permission is granted — some macOS versions return a black frame instead of None on denial. The PNG magic check at the end of the pipeline catches the truly malformed case, but you can't distinguish "denied" from "transient failure" from return value alone. The session orchestrator should call `permissions.check_permissions()` at `start()` time, not trust the capture return value.
+  - `NSBitmapImageFileTypePNG` has raw value `4` in modern AppKit. `NSPNGFileType` (the older symbol) was deprecated; do not re-import it. Bind the literal once in the module as `_NS_BITMAP_FILE_TYPE_PNG` so there's a single place to update if Apple ever rev's it.
+  - `NSScreen.mainScreen().backingScaleFactor()` is the most reliable Retina-detector — simpler than `CGDisplayPixelsWide / CGDisplayBounds.size.width`. Use it for the `display_info.scale_factor` field.
+  - When stubbing a PyObjC `cls.alloc().init…_(…)` two-step in tests, create a fresh subclass per test via `type("NSBitmapImageRep", (Base,), {...})` so class-level state (the "next PNG bytes to return", the shared `rep_calls` list) doesn't leak between tests. Declaring `ClassVar[list[...]] = []` on a base class directly will be flagged by ruff RUF012 AND will bleed state across tests.
+  - Keep keyframe policy stateless. The session orchestrator (R-010) will own: `last_keyframe_time`, the periodic `threading.Timer`, the post-click delayed capture (use `threading.Timer(0.1, …)`). The policy is pure — `reason = policy.reason_for(kind, time.monotonic() - last)` — no race conditions, no test-only time injection needed inside the policy.
+  - Do NOT add Pillow just to validate PNGs in tests. `b"\\x89PNG\\r\\n\\x1a\\n"` + the IHDR chunk format (`length(4) + "IHDR" + width(4) + height(4) + …`) is enough to crc-check + dimension-check with `struct` and `zlib`.
+  - Post-click keyframe delay (`POST_CLICK_DELAY_SECONDS = 0.1`) is owned by the policy constants but enforced by the session via `threading.Timer`. If you need to tighten it in tests, pass a shorter `post_click_delay_seconds` to `KeyframePolicy` rather than monkey-patching the module constant.
 ---

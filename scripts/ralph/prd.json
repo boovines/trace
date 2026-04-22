@@ -220,7 +220,7 @@
         "ruff check passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "On Retina displays, CGWindowListCreateImage returns pixel-density images. metadata.json's display_info.scale_factor must reflect this so the Runner can map click coordinates correctly. Test this on a real Retina Mac — do not trust unit tests here."
     },
     {
