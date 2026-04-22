@@ -200,7 +200,7 @@
         "pytest passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Fake mode is non-negotiable — without it, every test costs money and is non-deterministic. The Ralph loop for this module will invoke LLMClient hundreds of times during iteration; the API-key env check + fake mode default ensures the Ralph loop never bills real API calls unless explicitly enabled."
     },
     {
