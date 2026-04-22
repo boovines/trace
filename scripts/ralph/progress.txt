@@ -1,3 +1,25 @@
 # Ralph Progress Log
 Started: Wed Apr 22 15:33:38 EDT 2026
 ---
+
+## Codebase Patterns
+- uv workspace: dev extras on workspace members aren't picked up by `uv sync --extra dev` at the root; use `uv sync --all-extras --all-packages` (or run per-package) to install a workspace member's dev deps.
+- Synthesizer package uses **src layout** (`services/synthesizer/src/synthesizer/`) with hatchling; declare `[tool.hatch.build.targets.wheel] packages = ["src/synthesizer"]` so the wheel finds it.
+- `pytest` exits 5 on "no tests collected" — that's NOT zero. If a story's AC requires `pytest ... exits 0`, add at least one smoke test to the new suite.
+- All synthesizer tests run with `TRACE_LLM_FAKE_MODE=1` + `ANTHROPIC_API_KEY=test-dummy-key` forced via an autouse fixture in `tests/synthesizer/conftest.py`, plus the `anthropic_mock` respx router is autouse-installed on every test so an unmocked call to `api.anthropic.com` raises instead of hitting the network.
+- Per-service `pyproject.toml` declares its own `[tool.mypy] strict = true` so `uv run mypy --strict services/synthesizer` uses service-scoped config (not the root's). Root `[tool.mypy]` still covers `services` + `gateway` for repo-wide checks.
+
+## 2026-04-22 - S-001 Package scaffold under the uv monorepo workspace
+- Converted `services/synthesizer/` from the flat `synthesizer/` layout to the src layout required by the PRD: `src/synthesizer/{__init__.py, __main__.py, api.py}`.
+- Rewrote `services/synthesizer/pyproject.toml` to declare the full runtime deps (fastapi, uvicorn[standard], anthropic>=0.40, jsonschema, pydantic>=2, sse-starlette) and dev extras (pytest, pytest-asyncio, respx, mypy, ruff), added hatchling build config for the src layout, and a service-scoped strict mypy block with per-module overrides for anthropic/jsonschema/sse_starlette/respx type stubs.
+- Added `tests/synthesizer/__init__.py` and `tests/synthesizer/conftest.py` — conftest exposes the `anthropic_mock` respx fixture, forces fake-mode env vars via autouse, and installs the respx router on every test to catch stray network calls.
+- Added `tests/synthesizer/test_scaffold.py` with 3 smoke tests: version import, FastAPI router mounts + serves `/synthesize/status`, and the anthropic_mock fixture actually intercepts `api.anthropic.com`.
+- Updated `services/synthesizer/README.md` with src-layout description, quality-gate commands, and an explicit link back to the repo-root CLAUDE.md.
+- Files changed: services/synthesizer/pyproject.toml, services/synthesizer/README.md, services/synthesizer/src/synthesizer/{__init__,__main__,api}.py (new), services/synthesizer/synthesizer/* (deleted), tests/synthesizer/{__init__,conftest,test_scaffold}.py (new), scripts/ralph/prd.json (passes: true for S-001).
+- Quality gates: `uv run ruff check services/synthesizer tests/synthesizer` ✓, `uv run mypy --strict services/synthesizer` ✓ (3 files), `uv run pytest tests/synthesizer/` ✓ (3 passed, exit 0).
+- **Learnings for future iterations:**
+  - When tests live outside the package directory (here: `tests/synthesizer/` vs `services/synthesizer/src/synthesizer/`), the editable install of `trace-synthesizer` is what makes `from synthesizer import ...` resolve — `uv sync --all-extras --all-packages` is what produces that editable install.
+  - Every future story that tests an LLM call should request the `anthropic_mock` fixture and register routes on it; the autouse guard already blocks real network traffic, but explicit routes produce readable failure messages.
+  - Do not put `ANTHROPIC_API_KEY` in any committed file; the conftest sets a `test-dummy-key` value at runtime and asserts it starts with `test-` so a CI with a real key leaking in would fail loudly.
+  - Root `pyproject.toml`'s `[tool.mypy] files = ["services", "gateway"]` will pull in both recorder and synthesizer when run at the repo level; the service-scoped `uv run mypy --strict services/synthesizer` avoids cross-service noise during this branch's iteration.
+---

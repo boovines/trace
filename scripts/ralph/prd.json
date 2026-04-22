@@ -69,7 +69,7 @@
         "services/synthesizer/README.md exists with a one-paragraph description and a link to CLAUDE.md at repo root"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Foundation story. No functional code. The respx fixture is critical — every subsequent story that tests an LLM call will use it, so getting it right here saves rework. Do NOT add ANTHROPIC_API_KEY anywhere — that's read from env at runtime only."
     },
     {
