@@ -197,7 +197,7 @@
         "ruff check passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "This is the cleanest semantic gain over pixel-level recording. Sensitive-field redaction is explicitly out of scope for v1 per CLAUDE.md — do NOT add it here even if it seems helpful. For v1, anything typed is captured as-is. That is a deliberate personal-use decision documented in the overview."
     },
     {
