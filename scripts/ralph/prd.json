@@ -117,7 +117,7 @@
         "pytest passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "The Runner depends on this parser to extract steps in order. The round-trip test is the strongest single test in this module — it catches subtle drift that would otherwise show up as mystery bugs in the Runner three weeks later. Do NOT use a generic markdown library (commonmark, mistune) that normalizes whitespace aggressively — roll a small, predictable hand-parser that preserves structure."
     },
     {
