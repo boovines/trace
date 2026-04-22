@@ -110,7 +110,7 @@
         "ruff check passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "These checks must not prompt the user — the Tauri UI will own the prompting UX. The check is pure inspection. If PyObjC doesn't expose CGPreflightScreenCaptureAccess directly, use a workaround (attempt to grab a 1x1 screenshot and check for failure)."
     },
     {

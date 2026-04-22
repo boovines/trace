@@ -20,6 +20,8 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **Atomic JSON writes**: `_atomic_write_json(path, data)` writes to `<path>.tmp`, fsyncs, and renames. Use it for any metadata-style file. `events.jsonl` is append-flush (no fsync per line — documented v1 tradeoff).
 - **Datetime import style**: use `from datetime import UTC, datetime` (Python 3.11+). Ruff's `UP017` flags `timezone.utc` — don't revive it. ISO strings are produced with `datetime.now(UTC).isoformat(timespec="milliseconds")` which yields `+00:00` suffixes; the schema's `format: date-time` accepts both `+00:00` and `Z`.
 - **Ruff SIM105**: prefer `with contextlib.suppress(OSError): os.fsync(...)` over `try/except/pass` for best-effort fsync on filesystems that don't support it (tmpfs in pytest tmp_path).
+- **PyObjC mocking in tests**: for any module that does `from ApplicationServices import X` / `from Quartz import Y` inside a function, tests stub the framework by installing a `types.ModuleType("Quartz")` / `types.ModuleType("ApplicationServices")` into `sys.modules` via `monkeypatch.setitem`. The import inside the tested function then resolves to the stub. For ImportError coverage, install a stub that is missing the expected attributes — `from X import missing_attr` raises ImportError, which the module under test should catch.
+- **Permission-check pattern**: `recorder.permissions` keeps each macOS framework call in its own thin `_check_*` helper, and `check_permissions()` / `get_missing_permissions_error()` simply compose them. Tests patch the helpers for combination coverage and patch the PyObjC symbols inside `sys.modules` for helper-level coverage. Use the same pattern for any future PyObjC-backed module (event_tap, ax_resolver, focus_tracker, screenshot) to keep the suite hermetic on Ralph's sandbox.
 
 ---
 
@@ -83,4 +85,30 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - When assigning `seq` before validating, copy the dict (`dict(event)`) so validation failures don't mutate the caller's input — this matters for the session orchestrator that may retry or re-route a rejected event.
   - The writer's `_lock` is coarse (guards both the counter and the file handle). That's fine for the expected event rate (well under 1k events/sec); if we ever need finer granularity, split into a `seq_lock` + `write_lock` — but beware of ordering: the on-disk order must match seq order for tests and for downstream Synthesizer consumption.
   - `close()` reading the metadata from disk as a fallback means that even if a test calls `close()` without ever calling `write_metadata()`, we don't crash — we just skip the `stopped_at` finalisation. The orchestrator should always call `write_metadata()` first, but the writer defends against the bad ordering.
+---
+
+## 2026-04-22 - R-004
+- Added `services/recorder/src/recorder/permissions.py` exposing `check_permissions()` and `get_missing_permissions_error()`.
+  - `_check_accessibility()` calls `AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False})` — pure inspection, never prompts (the Tauri UI owns prompting UX per the PRD).
+  - `_check_screen_recording()` prefers `CGPreflightScreenCaptureAccess()` and falls back to `CGDisplayCreateImageForRect` on a 1x1 rect when preflight is missing or raises.
+  - `_check_input_monitoring()` attempts a listen-only `CGEventTapCreate` with an empty mask and treats a non-NULL return as proof of permission; the probe tap is invalidated immediately via `CFMachPortInvalidate` so no run-loop source leaks.
+  - Every helper catches `Exception` from the framework call and returns `False` — never raises past the module boundary so the HTTP layer can trust it.
+  - `get_missing_permissions_error()` emits in canonical order (accessibility → screen_recording → input_monitoring) and includes per-permission `how_to_grant` human-readable instructions keyed by the same permission name.
+- Added `tests/recorder/test_permissions.py` (24 tests):
+  - 8 parametrized combination tests for `check_permissions()` (every boolean triple).
+  - Composition tests for `get_missing_permissions_error()`: all granted returns None, single missing, all missing (canonical order), partial missing order preservation.
+  - Accessibility helper: framework truthy/falsey, framework raises, framework import broken (ImportError path).
+  - Screen Recording helper: preflight True/False, preflight raises → capture-fallback success, preflight raises → capture returns None → False.
+  - Input Monitoring helper: tap created → True + invalidate called, tap None → False, tap create raises → False, invalidate raises → True (clean-up failure doesn't taint result).
+- Files changed:
+  - `services/recorder/src/recorder/permissions.py` (new)
+  - `tests/recorder/test_permissions.py` (new)
+  - `scripts/ralph/prd.json` (R-004 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (59 tests total).
+- **Learnings for future iterations:**
+  - `from Module import name` inside a function can be stubbed by installing a `types.ModuleType` into `sys.modules` via `monkeypatch.setitem("Module", stub)`. This is the cleanest way to mock PyObjC without actually touching macOS APIs.
+  - To exercise the ImportError path on a local `from X import sym` inside a function, install a stub module that is *missing* `sym`. That raises `ImportError` (not `AttributeError`) because `from-import` specifically surfaces missing names as ImportError.
+  - `AXIsProcessTrustedWithOptions` must be invoked with `kAXTrustedCheckOptionPrompt: False` to suppress the system prompt. Tests assert this option is set on the passed dict — do not relax it, or `check_permissions()` could start surfacing the system prompt during polling.
+  - The canonical ordering of permissions in `get_missing_permissions_error()` matters for UI consistency — tests lock it in.
+  - Ralph's sandbox may have PyObjC installed (on darwin) but not have the permissions granted, so a real call to `_check_input_monitoring()` may legitimately return False there. Do not write tests that assume True without the framework-level mock.
 ---
