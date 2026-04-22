@@ -251,7 +251,7 @@
         "pytest passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "The dry-run adapter is how Ralph iterates safely. Every test in this module uses DryRunInputAdapter by default. The LiveInputAdapter is written in X-008 and is the ONLY place that calls CGEventPost."
     },
     {
