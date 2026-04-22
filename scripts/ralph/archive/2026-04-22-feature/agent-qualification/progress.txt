@@ -1,0 +1,173 @@
+## Codebase Patterns
+- Use `from __future__ import annotations` at top of all files with type hints (Python 3.9.6 compat)
+- LangGraph MemorySaver import: `from langgraph.checkpoint.memory import MemorySaver`
+- LangGraph Command import: `from langgraph.types import Command`
+- Never modify `adela_outbound/api/main.py` or `adela_outbound/scheduler.py` — owned by feature/agent-discovery
+- Never modify `adela_outbound/db/schemas.py` or `adela_outbound/db/contracts.py` — owned by feature/agent-discovery
+- Config singleton: `from adela_outbound.config import config`
+- DB connection: `from adela_outbound.db.connection import get_db` used as `async with get_db() as conn:`
+- pytest with `asyncio_mode = auto` in pytest.ini — no need for `@pytest.mark.asyncio` decorator
+- Router imports of graph module should be inside function bodies to avoid circular imports at module level
+- Route ordering: define GET /queue before GET /{company_id}/brief to avoid path param capture conflict
+- SSE pattern: asyncio.Queue per client, append to events.sse_queues, StreamingResponse with keepalive
+- ICP imports (load_icp, save_icp_version, save_icp_suggestion) are at module level in qualification.py — no circular import issue since icp.py has no graph dependency
+
+## 2026-03-29 - US-001
+- Created all qualification agent scaffold and stub files
+- Files created:
+  - adela_outbound/agents/qualification/__init__.py (empty)
+  - adela_outbound/agents/qualification/state.py (QualificationState TypedDict)
+  - adela_outbound/agents/qualification/events.py (SSE bus stub)
+  - adela_outbound/agents/qualification/icp.py (ICP operations stub)
+  - adela_outbound/agents/qualification/scorer.py (criterion scorer stub)
+  - adela_outbound/agents/qualification/nodes.py (6 graph nodes stub)
+  - adela_outbound/agents/qualification/graph.py (MemorySaver + run/resume stubs)
+  - adela_outbound/api/routers/qualification.py (APIRouter stub)
+  - tests/test_qualification_scorer.py (placeholder test)
+  - tests/test_qualification_graph.py (placeholder test)
+- Verified: contracts import OK, schemas tables OK, langgraph imports OK, all 3 tests PASSED
+- **Learnings for future iterations:**
+  - Cherry-pick from feature/agent-discovery already applied — contracts and schemas are in place
+  - langgraph is already in requirements.txt from the cherry-pick
+  - pytest.ini has `asyncio_mode = auto` — async tests work without decorator
+  - qualification agent has NO sources/ subdirectory (unlike discovery)
+- Strip markdown fences from Claude API responses before JSON parsing (```json ... ```)
+- Use unittest.mock.AsyncMock for mocking async client methods in tests
+---
+
+## 2026-03-29 - US-002
+- Implemented icp.py with full ICP seed definition, seed_icp_if_empty, load_icp (with lazy seeding), save_icp_version, and save_icp_suggestion
+- Files changed:
+  - adela_outbound/agents/qualification/icp.py (full implementation replacing stub)
+  - tests/test_qualification_scorer.py (3 ICP tests replacing placeholder)
+- All 5 tests PASSED
+- **Learnings for future iterations:**
+  - load_icp uses lazy seeding — if no rows, calls seed_icp_if_empty then re-queries. No startup hook needed.
+  - save_icp_version uses INSERT not UPDATE — creates new version row each time for full history
+  - aiosqlite.Row factory must be set on conn for dict(row) to work in load_icp
+  - Test helper _make_conn(tmp_path) creates an in-memory DB with all tables — reusable for future test files
+---
+
+## 2026-03-29 - US-003
+- Implemented scorer.py with full per-criterion Claude scoring and aggregate score calculator
+- Functions: score_criterion (async, calls Claude per criterion), score_all_criteria (concurrent via asyncio.gather), aggregate_scores (sync weighted arithmetic)
+- Files changed:
+  - adela_outbound/agents/qualification/scorer.py (full implementation replacing stub)
+  - tests/test_qualification_scorer.py (4 new tests: aggregate strong/disqualified/missing + Claude failure mock)
+- All 7 tests PASSED
+- **Learnings for future iterations:**
+  - Markdown fence stripping needed for Claude API JSON responses — check for ``` prefix and strip first/last lines
+  - AsyncMock from unittest.mock works well for mocking anthropic client.messages.create
+  - aggregate_scores is pure sync — no async needed, trivially testable without mocks
+  - WEIGHT_VALUES and FIT_TIER_THRESHOLDS are module-level dicts for easy tuning
+- LangGraph `interrupt_before` resume pattern: use `graph.aupdate_state(config, update)` then `graph.ainvoke(None, config)` — NOT `Command(resume=...)` which is for `interrupt()` function calls
+- Graph compile with interrupt: `builder.compile(checkpointer=checkpointer, interrupt_before=['hitl_gate'])`
+- thread_id=company_id pattern: each company has one graph checkpoint, re-runs overwrite
+---
+
+## 2026-03-29 - US-004
+- Implemented full nodes.py with all 6 graph nodes: input_loader, criterion_scorer, aggregate_scorer, qualification_brief_builder, hitl_gate, resume_handler
+- input_loader: JOINs prospect_briefs + discovery_queue, parses JSON fields, loads ICP via load_icp
+- criterion_scorer: creates AsyncAnthropic client, delegates to score_all_criteria
+- aggregate_scorer: calls aggregate_scores, builds qualification_brief dict
+- qualification_brief_builder: generates why_now/suggested_outreach_angle via Claude, handles auto-disqualify (fit_tier='disqualified' → writes directly to DB, sets decision='auto_rejected'), writes pending_review briefs to DB, broadcasts SSE
+- hitl_gate: intentionally empty (interrupt_before pauses BEFORE this node)
+- resume_handler: handles approved/rejected/auto_rejected decisions, updates qualification_briefs + discovery_queue, writes icp_feedback on rejection
+- Files changed:
+  - adela_outbound/agents/qualification/nodes.py (full implementation replacing stub)
+- All 9 tests PASSED
+- **Learnings for future iterations:**
+  - state.py was already correct from US-001 — no changes needed
+  - The auto-disqualify path writes to DB inside qualification_brief_builder and sets decision='auto_rejected', then resume_handler has an elif branch that does nothing (already written)
+  - Markdown fence stripping pattern is reused from scorer.py for Claude JSON responses
+  - broadcast() from events.py is called only for pending_review briefs, not auto-rejected ones
+---
+
+## 2026-03-29 - US-005
+- Replaced graph.py stub with full LangGraph StateGraph assembly
+- Module-level MemorySaver checkpointer singleton, 6-node graph with conditional edge for auto-disqualify
+- run_qualification: ainvoke with initial state, returns at HITL interrupt
+- resume_qualification: ainvoke with Command(resume=...) to merge decision into state
+- _route_after_brief: conditional edge routing auto_rejected to resume_handler, others to hitl_gate
+- Files changed:
+  - adela_outbound/agents/qualification/graph.py (full implementation replacing stub)
+- All 9 tests PASSED
+- **Learnings for future iterations:**
+  - Graph compile with interrupt_before returns state dict on pause (not exception)
+  - Command(resume=data) merges data into graph state on resume
+  - Module-level graph build (builder, compile) runs at import time — keep it lightweight
+  - The conditional edge map keys must match the return values of _route_after_brief exactly
+---
+
+## 2026-03-29 - US-006
+- Replaced qualification router stub with full implementation: 6 endpoints
+- Endpoints: POST /run/{company_id}, POST /approve/{company_id}, POST /reject/{company_id}, GET /queue, GET /{company_id}/brief, GET /stream
+- RejectRequest pydantic model with field_validator ensures rejection note is non-empty
+- Approve/reject endpoints check graph paused state via qualification_graph.get_state(config).next
+- GET /queue returns pending_review briefs ordered by fit_score DESC
+- GET /{company_id}/brief includes criterion_scores (JSON parsed) and prospect_brief_summary
+- GET /stream uses SSE with asyncio.Queue and qual_events.sse_queues
+- Files changed:
+  - adela_outbound/api/routers/qualification.py (full implementation replacing stub)
+- All 9 tests PASSED
+- **Learnings for future iterations:**
+  - Graph imports (qualification_graph, run_qualification, resume_qualification) are inside function bodies to avoid circular imports
+  - qualification_graph.get_state(config).next returns tuple of next nodes if paused, empty/None if completed
+  - Route ordering matters: GET /queue must be defined before GET /{company_id}/brief to avoid path parameter capture
+  - SSE pattern: create asyncio.Queue, append to sse_queues list, yield from queue in StreamingResponse generator, remove on disconnect
+---
+
+## 2026-03-29 - US-007
+- Added 5 ICP management endpoints to qualification router: GET /icp, PUT /icp, GET /icp/suggestions, POST /icp/suggestions/{id}/accept, POST /icp/suggestions/{id}/reject
+- Files changed:
+  - adela_outbound/api/routers/qualification.py (added ICP endpoints + icp module imports)
+- All 9 tests PASSED
+- **Learnings for future iterations:**
+  - ICP imports (load_icp, save_icp_version, save_icp_suggestion) can be at module level — no circular import issue since icp.py doesn't depend on graph.py
+  - Route ordering: /icp and /icp/suggestions placed before /{company_id}/brief to avoid path param capture
+  - accept_suggestion parses suggestion_text as JSON criteria — suggestion_text must contain serialized criteria list (enforced by US-008 weekly job)
+---
+
+## 2026-03-29 - US-008
+- Added generate_icp_suggestions() to icp.py — weekly job that analyses last 30 days of icp_feedback via Claude and saves up to 3 ICP refinement suggestions
+- Added _register_weekly_job() and on_startup=[_register_weekly_job] to qualification router — registers APScheduler cron job (Sunday 20:00) on the existing scheduler singleton without modifying scheduler.py
+- Files changed:
+  - adela_outbound/agents/qualification/icp.py (added generate_icp_suggestions function)
+  - adela_outbound/api/routers/qualification.py (added _register_weekly_job startup callback, logger)
+- All 9 tests PASSED
+- **Learnings for future iterations:**
+  - Router on_startup is a FastAPI feature — callbacks fire when app starts, same as lifespan handlers
+  - scheduler.add_job with replace_existing=True is safe to call multiple times (idempotent)
+  - generate_icp_suggestions uses separate get_db() context managers for read and write — avoids holding connection open during Claude call
+  - save_icp_suggestion stores new_criteria as JSON string in suggestion_text field — accept_suggestion endpoint parses it back
+---
+
+## 2026-03-29 - US-009
+- Replaced placeholder test with full integration tests: test_hitl_pause_and_resume_approval and test_auto_disqualify
+- Fixed graph.py resume_qualification to use aupdate_state + ainvoke(None) instead of Command(resume=...) — the latter is for interrupt() function calls, not interrupt_before
+- test_hitl_pause_and_resume_approval: sets up DB with discovery_queue + prospect_brief + ICP, mocks score_all_criteria and AsyncAnthropic, verifies graph pauses at hitl_gate, brief written as pending_review, then resumes with approval and verifies DB updated
+- test_auto_disqualify: all scores=0, verifies auto_rejected status, discovery_queue=disqualified, graph not paused
+- Files changed:
+  - tests/test_qualification_graph.py (full integration test replacing placeholder)
+  - adela_outbound/agents/qualification/graph.py (fixed resume_qualification)
+- All 10 tests PASSED
+- **Learnings for future iterations:**
+  - LangGraph interrupt_before resume: use `graph.aupdate_state(config, state_update)` then `graph.ainvoke(None, config)` — Command(resume=...) is for interrupt() calls only
+  - Patching needs 3 config modules: connection.config, nodes.config, scorer.config for DB_PATH and API key
+  - MemorySaver checkpointer is module-level singleton — shared across tests in same process, use unique company_ids per test
+  - _make_strong_scores() helper with score=2 per criterion yields fit_tier > disqualified; _make_zero_scores() with score=0 yields fit_tier=disqualified
+---
+
+## 2026-03-29 - US-010
+- Replaced events.py stub broadcast with full implementation (put_nowait to all sse_queues, QueueFull silenced)
+- Created .env.example with ANTHROPIC_API_KEY
+- Created README.md with full project documentation: HITL architecture, parallel branch architecture, setup, running (port 8002), all 11 API endpoints, testing, shared contract warning, mandatory rejection note callout
+- Files changed:
+  - adela_outbound/agents/qualification/events.py (broadcast implementation)
+  - .env.example (new)
+  - README.md (new)
+- All 10 tests PASSED, router import OK
+- **Learnings for future iterations:**
+  - events.py has zero imports from adela_outbound — only uses stdlib asyncio
+  - All 10 user stories now complete and passing
+---
