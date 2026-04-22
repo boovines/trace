@@ -27,6 +27,8 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **Re-enabling a disabled tap**: `CGEventTapEnable(tap, True)` re-arms a tap the OS disabled via `kCGEventTapDisabledByTimeout` / `kCGEventTapDisabledByUserInput`. Both constants appear as unsigned `uint32` (0xFFFFFFFE / 0xFFFFFFFF) in headers but PyObjC sometimes surfaces them as signed ints (-2 / -1); match both forms.
 - **Bounded-time framework calls**: when a PyObjC call could block indefinitely (AX queries, inter-app RPC), wrap it with a daemon `threading.Thread` and a `threading.Event` set in a `finally`. The caller `event.wait(timeout)` — on timeout the worker thread just keeps living as a daemon. Do not rely on `Thread.join(timeout)` alone to tell "done" from "still running"; always use a separate event sentinel. See `ax_resolver.resolve_element_at` for the reference.
 - **PyObjC AX value shapes**: AX position/size attributes come back as one of three shapes depending on macOS/PyObjC version — native 2-tuple, bridged object with `.x/.y` or `.width/.height`, or raw `AXValueRef` that must be unwrapped via `AXValueGetValue(value, kAXValueCG{Point,Size}Type, None) -> (success, unpacked)`. Any new AX-consuming code should tolerate all three (see `_unpack_ax_value` in ax_resolver.py).
+- **NSWorkspace subscription pattern**: prefer `addObserverForName:object:queue:usingBlock:` (a Python callable passed as block) over the NSObject-subclass selector pattern — it keeps the handler method on the Python class and avoids `@objc.selector` machinery. The block returns an opaque observer handle that must be passed back to `removeObserver:` on stop. Tests stub `AppKit.NSWorkspace.sharedWorkspace().notificationCenter()` with a class that captures `(name, block)` in a list so we can invoke the block synchronously with a fake notification. See `focus_tracker._subscribe_workspace` for the reference.
+- **NSDictionary dual-access**: `userInfo()` on an `NSNotification` is bridged to a Python dict in most PyObjC builds but not all. Accept both by trying `.get(key)` first (callable on a bridged dict) and falling back to `objectForKey_(key)` on an ObjC-only stub. Same pattern applies to any NSDictionary the recorder reads out of a framework callback.
 
 ---
 
@@ -180,4 +182,31 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - Bounded-time AX work: `threading.Thread` + `Event.wait(timeout)` is sufficient and simpler than `concurrent.futures` for fire-and-forget short calls. The thread is daemon, so if it stays stuck on a misbehaving AX server, it just dies with the process instead of leaking. Do NOT use `thread.join(timeout)` alone as the signal — on timeout the returned thread is still alive and you cannot distinguish "finished" from "dead" without a separate sentinel. Use a `threading.Event` set in a `finally` block.
   - The resolver preserves the HIT element's role/identifier/frame and only borrows the parent's label when walking — the click coordinate's semantic position should not change just because we found a nicer name.
   - When adopting `str()` on an AX value, handle empty strings: they should be treated as "unknown" (returned as None). AX often reports empty strings rather than nil for missing titles, and passing an empty label downstream confuses synthesis prompts.
+---
+
+## 2026-04-22 - R-007
+- Added `services/recorder/src/recorder/focus_tracker.py` exposing `FocusTracker` plus `AppInfo`, `AppFocusHistoryEntry`, `AppSwitchPayload`, `WindowFocusPayload` TypedDicts.
+  - `start()` subscribes to `NSWorkspaceDidActivateApplicationNotification` via `notificationCenter().addObserverForName_object_queue_usingBlock_(…, self._ns_workspace_block)` and seeds current state from `NSWorkspace.frontmostApplication()` if available. Raises on double-start; `stop()` is idempotent and calls `removeObserver_` with the handle returned from subscribe.
+  - `handle_app_activated(app)` is the public seam tests/orchestrator use to drive state without going through a notification; the block path converts the NSNotification userInfo → `AppInfo` dict and calls into the same state machine.
+  - Window title resolved via `AXUIElementCreateApplication(pid)` + `AXFocusedWindow` + `AXTitle`. Only queried on app-change transitions and on explicit `refresh_window_title()` — never on a timer, matching the PRD note. Empty titles are reported as `None`.
+  - Callbacks (`on_app_switch`, `on_window_focus_change`) fire outside the state lock; consumer exceptions are logged and swallowed so one bad listener never tears down tracking.
+  - Maintains `app_focus_history` with `entered_at` / `exited_at` ISO timestamps — `stop()` finalises the last entry. History is returned as a defensive copy so callers can't mutate internal state.
+- Added `tests/recorder/test_focus_tracker.py` (24 hermetic + 1 opt-in macOS integration):
+  - State machine: first-activation-from-none, subsequent switches carry `from_*`, reactivation same app is a no-op, history entries finalised in order, `stop()` finalises the tail, callback exception is isolated.
+  - Window title: refresh only fires on change, None-title doesn't spam callbacks, refresh-before-activation is safe, AX raises / ImportError / create-returns-None all degrade to `None`.
+  - NSWorkspace plumbing: `start()` adds exactly one observer for the right notification name, `stop()` removes it, `start()` twice raises, AppKit ImportError keeps the tracker usable via `handle_app_activated`, stored block delivers via a fake notification, missing userInfo is a safe no-op, `frontmostApplication()` seeds state at start.
+  - Helper coverage: `_extract_app_info` via both `.get` and `objectForKey_` paths; `_ns_running_app_to_dict` rejects missing pid and converts empty fields to empty strings.
+  - `@pytest.mark.macos test_macos_real_app_switch_fires_callback` drives two real apps via `osascript` on a real Mac; skipped by default.
+- Files changed:
+  - `services/recorder/src/recorder/focus_tracker.py` (new)
+  - `tests/recorder/test_focus_tracker.py` (new)
+  - `scripts/ralph/prd.json` (R-007 passes=true)
+  - `scripts/ralph/progress.txt` (added NSWorkspace + NSDictionary patterns to Codebase Patterns)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (116 passed, 3 skipped — the opt-in macOS tests for event_tap, ax_resolver, focus_tracker).
+- **Learnings for future iterations:**
+  - `addObserverForName_object_queue_usingBlock_` is friendlier than the selector-based pattern for PyObjC interop — the block is just a Python callable and PyObjC handles the bridging. Use this whenever you need to observe an `NSNotificationCenter` without introducing an NSObject subclass.
+  - NSDictionary bridging is not guaranteed: some PyObjC versions bridge `userInfo()` to a plain dict, others hand back an NSDictionary with only Objective-C accessors. Check for `.get` first (bridged) and fall back to `objectForKey_` (ObjC) — see `_extract_app_info`.
+  - Empty-string AX values should collapse to `None` at the module boundary. Otherwise downstream code has to repeatedly special-case `""` as "no title available" and it becomes easy to emit a `window_focus` event with a useless empty title.
+  - When writing a test stub that needs to emulate "forced ObjC path" (no Python `.get`), do NOT set `user_info.get = None` on a dict subclass — calling a None later raises TypeError inside the caught `except Exception` and the whole extraction silently returns None. Instead define a separate minimal class that exposes only `objectForKey_`.
+  - The focus tracker owns `app_focus_history` for metadata.json. The session orchestrator (R-010) should call `focus_tracker.get_app_focus_history()` right before `writer.close()` (which rewrites metadata with stopped_at) so the last entry's `exited_at` is populated. `FocusTracker.stop()` also finalises the tail so it's safe either way, but calling `stop()` before grabbing the history is cleanest.
 ---

@@ -173,7 +173,7 @@
         "ruff check passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Window title polling can be expensive — only poll when the focused app changes OR when an AXFocusedWindowChanged notification fires, never on a timer."
     },
     {
