@@ -92,7 +92,7 @@
         "pytest passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "This is a locked contract once Runner has shipped. The cross-check validator is load-bearing: the LLM will produce drift between markdown and meta, and we catch it structurally rather than hoping for prompt obedience. Do NOT relax the additionalProperties: false — it catches bugs early."
     },
     {

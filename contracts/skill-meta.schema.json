@@ -2,35 +2,83 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://trace.local/contracts/skill-meta.schema.json",
   "title": "SkillMeta",
-  "description": "Shape of skill.meta.json. SKILL.md is the human-readable sibling; this file is the machine-readable one the Runner consumes.",
+  "description": "Machine-readable sibling of SKILL.md. Locked contract once Module 3 (Runner) ships; additionalProperties is deliberately false to catch key typos early.",
   "type": "object",
-  "required": ["slug", "version", "trajectory_ref", "parameters", "destructive_steps", "created_at"],
+  "additionalProperties": false,
+  "required": [
+    "slug",
+    "name",
+    "trajectory_id",
+    "created_at",
+    "parameters",
+    "destructive_steps",
+    "preconditions",
+    "step_count"
+  ],
   "properties": {
-    "slug": { "type": "string", "pattern": "^[a-z0-9_]+$" },
-    "version": { "type": "string" },
-    "trajectory_ref": { "type": "string", "description": "UUID of the source trajectory" },
-    "created_at": { "type": "string", "format": "date-time" },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{2,39}$",
+      "description": "URL-and-filesystem-safe identifier, 3-40 chars, starts with a letter."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Human-readable display name."
+    },
+    "trajectory_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "UUID of the source trajectory this skill was synthesized from."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp of when the skill was written to disk."
+    },
     "parameters": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "type"],
+        "additionalProperties": false,
+        "required": ["name", "type", "required"],
         "properties": {
-          "name": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
-          "type": { "type": "string", "enum": ["string", "number", "boolean", "date"] },
-          "description": { "type": "string" },
-          "default": {}
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,29}$",
+            "description": "Parameter identifier used in {name} references inside SKILL.md."
+          },
+          "type": {
+            "type": "string",
+            "enum": ["string", "integer", "boolean"]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "default": {
+            "type": ["string", "integer", "boolean", "null"]
+          }
         }
       }
     },
     "destructive_steps": {
       "type": "array",
       "description": "1-based indices of SKILL.md steps that require confirmation before execution.",
-      "items": { "type": "integer", "minimum": 1 }
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
     },
-    "preview_screenshots": {
+    "preconditions": {
       "type": "array",
-      "items": { "type": "string", "description": "Relative path under preview/" }
+      "items": {
+        "type": "string"
+      }
+    },
+    "step_count": {
+      "type": "integer",
+      "minimum": 1
     }
   }
 }

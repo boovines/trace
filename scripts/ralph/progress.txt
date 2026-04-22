@@ -8,6 +8,10 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - `pytest` exits 5 on "no tests collected" — that's NOT zero. If a story's AC requires `pytest ... exits 0`, add at least one smoke test to the new suite.
 - All synthesizer tests run with `TRACE_LLM_FAKE_MODE=1` + `ANTHROPIC_API_KEY=test-dummy-key` forced via an autouse fixture in `tests/synthesizer/conftest.py`, plus the `anthropic_mock` respx router is autouse-installed on every test so an unmocked call to `api.anthropic.com` raises instead of hitting the network.
 - Per-service `pyproject.toml` declares its own `[tool.mypy] strict = true` so `uv run mypy --strict services/synthesizer` uses service-scoped config (not the root's). Root `[tool.mypy]` still covers `services` + `gateway` for repo-wide checks.
+- `contracts/*.schema.json` is located at runtime by walking up from `Path(__file__)` until a directory containing `contracts/` is found; this keeps modules working from both the editable workspace install and a future published wheel without hard-coding a relative path.
+- jsonschema's `FormatChecker` validates `uuid` out-of-the-box, but `date-time` requires the optional `rfc3339-validator` dep — schemas relying on strict date-time enforcement should combine `type: "string"` with a regex pattern or a post-validation Python check, not just the `format` keyword.
+- `jsonschema` ships no PEP 561 type stubs; use `# type: ignore[import-untyped]` on the import line to keep `mypy --strict` green without pulling in `types-jsonschema`.
+- When two branches of one function both assign `sorted(set_diff)` to the same variable name, mypy pins the variable's element type from the first assignment. Use distinct names per branch (e.g., `only_md_steps` vs `only_md_params`) to avoid spurious `incompatible type` errors.
 
 ## 2026-04-22 - S-001 Package scaffold under the uv monorepo workspace
 - Converted `services/synthesizer/` from the flat `synthesizer/` layout to the src layout required by the PRD: `src/synthesizer/{__init__.py, __main__.py, api.py}`.
@@ -22,4 +26,17 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - Every future story that tests an LLM call should request the `anthropic_mock` fixture and register routes on it; the autouse guard already blocks real network traffic, but explicit routes produce readable failure messages.
   - Do not put `ANTHROPIC_API_KEY` in any committed file; the conftest sets a `test-dummy-key` value at runtime and asserts it starts with `test-` so a CI with a real key leaking in would fail loudly.
   - Root `pyproject.toml`'s `[tool.mypy] files = ["services", "gateway"]` will pull in both recorder and synthesizer when run at the repo level; the service-scoped `uv run mypy --strict services/synthesizer` avoids cross-service noise during this branch's iteration.
+---
+
+## 2026-04-22 - S-002 skill.meta.json JSON schema
+- Replaced the scaffold-era `contracts/skill-meta.schema.json` with the locked PRD-specified shape: required `{slug, name, trajectory_id, created_at, parameters, destructive_steps, preconditions, step_count}`, `additionalProperties: false` at both the top level and each parameter entry, slug pattern `^[a-z][a-z0-9_]{2,39}$`, parameter name pattern `^[a-z][a-z0-9_]{0,29}$`, parameter type enum `string|integer|boolean`, destructive_steps integer minimum 1.
+- Added `services/synthesizer/src/synthesizer/schema.py` with `load_meta_schema()`, `validate_meta()` (Draft202012Validator + FormatChecker), and `validate_meta_against_markdown()` that cross-checks three invariants: (1) markdown `## Steps` count matches `step_count` and numbering is 1..N sequential, (2) markdown `⚠️ [DESTRUCTIVE]` lines agree with `destructive_steps`, (3) markdown `{param}` references agree with `parameters[].name` in both directions. Cross-check raises `jsonschema.ValidationError` with a structured message naming the drift.
+- Added `tests/synthesizer/test_schema.py` with 7 valid meta dicts, 21 malformed meta dicts, and 10 cross-check tests (including fenced-code exclusion and repeated parameter references). 43 tests pass.
+- Files changed: contracts/skill-meta.schema.json (rewrite), services/synthesizer/src/synthesizer/schema.py (new), tests/synthesizer/test_schema.py (new), scripts/ralph/prd.json (passes: true for S-002), scripts/ralph/progress.txt (this entry + patterns).
+- Quality gates: `uv run ruff check services/synthesizer tests/synthesizer` ✓, `uv run mypy --strict services/synthesizer` ✓ (4 source files), `uv run pytest tests/synthesizer/` ✓ (43 passed).
+- **Learnings for future iterations:**
+  - The schema file path is the contract — tests and fixtures must load `contracts/skill-meta.schema.json`, never inline a copy.
+  - `validate_meta_against_markdown` strips triple-backtick fenced code blocks before extracting `{param}` references so markdown examples inside `## Notes` don't create false positives. The S-003 parser will handle inline code and escaped braces more rigorously, but the cross-check is already defensive enough for the LLM drift it's meant to catch.
+  - The `_find_repo_root` helper in `schema.py` walks up looking for `contracts/`; it's module-local for now but is a candidate for a shared helper when a second service (recorder, runner) needs the same lookup.
+  - Down the road S-010 (writer) and S-007 (draft generation) will call `validate_meta_against_markdown` as the final gate before any skill hits disk or before any LLM response is accepted — don't bypass it with "we just checked the schema" shortcuts; schema + cross-check together are the contract.
 ---
