@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+
+# uv
+uv.lock
+
+# Node / Tauri
+node_modules/
+app/src-tauri/target/
+app/dist/
+pnpm-lock.yaml
+.pnpm-store/
+
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+
+# Trace runtime data (should live in ~/Library/Application Support/Trace[-dev])
+# but guard anyway in case of stray local writes
+/runtime/
+/runs/
+/trajectories/
+/skills/
+
+# Ralph
+costs.jsonl

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trace.local/contracts/trajectory.schema.json",
+  "title": "Trajectory",
+  "description": "A directory-shaped artifact produced by the Recorder. The schema below describes the contents of metadata.json and the per-line shape of events.jsonl.",
+  "type": "object",
+  "definitions": {
+    "metadata": {
+      "type": "object",
+      "required": ["id", "started_at", "stopped_at", "label", "display_info", "app_focus_history"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "stopped_at": { "type": "string", "format": "date-time" },
+        "label": { "type": "string" },
+        "display_info": {
+          "type": "object",
+          "required": ["width", "height", "scale"],
+          "properties": {
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 },
+            "scale": { "type": "number", "minimum": 0.1 }
+          }
+        },
+        "app_focus_history": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["at", "bundle_id", "title"],
+            "properties": {
+              "at": { "type": "string", "format": "date-time" },
+              "bundle_id": { "type": "string" },
+              "title": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["t", "kind"],
+      "properties": {
+        "t": { "type": "string", "format": "date-time" },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "mouse_move",
+            "mouse_down",
+            "mouse_up",
+            "scroll",
+            "key_down",
+            "key_up",
+            "text_input",
+            "app_focus",
+            "screenshot",
+            "annotation"
+          ]
+        },
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "button": { "type": "string", "enum": ["left", "right", "middle"] },
+        "key": { "type": "string" },
+        "modifiers": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["cmd", "ctrl", "opt", "shift", "fn"] }
+        },
+        "text": { "type": "string" },
+        "bundle_id": { "type": "string" },
+        "screenshot_ref": { "type": "string", "description": "Relative path under screenshots/, e.g. screenshots/0001.png" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

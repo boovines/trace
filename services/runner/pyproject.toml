@@ -1,0 +1,10 @@
+[project]
+name = "trace-runner"
+version = "0.1.0"
+description = "Trace Module 3: executes a SKILL.md via Claude computer-use with safety gates."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.8",
+    "anthropic>=0.40",
+]
