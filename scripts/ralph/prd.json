@@ -79,7 +79,7 @@
         "uv run pytest tests/runner/ exits 0"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "The safety flag plumbing is foundational. No later story is allowed to bypass it. If a future story needs to call CGEventPost, it MUST first call require_live_mode() or route through the dry-run fake. Do NOT add ANTHROPIC_API_KEY anywhere in code — env only."
     },
     {

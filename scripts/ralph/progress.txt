@@ -1,3 +1,30 @@
 # Ralph Progress Log
 Started: Wed Apr 22 15:33:38 EDT 2026
 ---
+
+## Codebase Patterns
+- Runner uses a **src layout** (`services/runner/src/runner/`). Tests import `from runner.xxx`, resolved via `pythonpath = ["services/runner/src"]` in the root `pyproject.toml` pytest config. Do NOT add a nested `services/runner/runner/` package; that was the old flat layout and has been removed.
+- The root pyproject owns the shared `ruff`, `mypy`, and `pytest` config. The runner's own `pyproject.toml` only adds a mypy `files = ["src"]` override so `uv run mypy --strict services/runner` targets the runner package directly.
+- Safety gate: every live-mode code path must call `runner.safety.require_live_mode()` in `__init__`. The gate is strict string equality against `TRACE_ALLOW_LIVE="1"` — `"true"`, `"yes"`, `"0"`, etc. all disable live mode. `tests/runner/conftest.py` autouses a fixture that force-unsets the flag before every test; opt in with the `live_mode_allowed` fixture.
+- Tests mock Anthropic via `respx` (see `anthropic_mock` fixture) — never hit the real API.
+- Gateway (`gateway/main.py`) imports the runner as `from runner.api import router` (installed-package style via the pytest pythonpath). Synthesizer/recorder are still on the flat layout and import via `from services.{name}.{name}.api` — those packages will switch to src layout when their respective branches reach X-001-equivalent stories.
+
+---
+
+## 2026-04-22 - X-001 - Package scaffold under the uv monorepo workspace
+- Created `services/runner/src/runner/{__init__,__main__,api,safety}.py`.
+- Removed the old flat-layout `services/runner/runner/` directory.
+- Updated `services/runner/pyproject.toml` with hatchling build backend and the full dependency list (fastapi, uvicorn, anthropic, jsonschema, pydantic, pyobjc-framework-Cocoa/Quartz/ApplicationServices, websockets) plus dev deps (pytest, pytest-asyncio, respx, mypy, ruff, pillow).
+- Updated root `pyproject.toml`: added `respx` and `pillow` to dev extras; added `pythonpath = ["services/runner/src"]` to pytest config; pointed mypy at `services/runner/src` with `mypy_path`/`explicit_package_bases`; added `respx.*` to the `ignore_missing_imports` list.
+- Wrote `runner/safety.py` with `is_live_mode_allowed()` (strict `"1"` check), `require_live_mode()` raising `LiveModeNotAllowed` (a `RuntimeError` subclass with a message that names both `TRACE_ALLOW_LIVE` and Ralph).
+- Wrote `tests/runner/conftest.py` with an autouse `_force_live_mode_unset` fixture plus an opt-in `live_mode_allowed` fixture and a respx `anthropic_mock` fixture.
+- Wrote `tests/runner/test_safety.py` with 15 parametrized test cases covering default state, exact-"1" acceptance, rejection of `"0"`/`"true"`/`"TRUE"`/`"yes"`/empty/`"2"`/whitespace variants, `require_live_mode` error message mentions `TRACE_ALLOW_LIVE` and Ralph, and `LiveModeNotAllowed` subclasses `RuntimeError`.
+- Rewrote `services/runner/README.md` with a prominent SAFETY section enumerating the three gating layers and the `TRACE_ALLOW_LIVE` rule.
+- Updated `gateway/main.py` to `from runner.api import router as runner_router` (old path was deleted).
+- Quality gates: `uv sync --extra dev --extra macos` clean; `uv run ruff check services/runner` clean; `uv run mypy --strict services/runner` clean (4 source files); `uv run pytest tests/runner/` → 15 passed.
+- **Learnings for future iterations:**
+  - The pre-existing `tests/integration/test_gateway_healthz.py` was already broken before this story — `from gateway.main import app` fails because `gateway/` is not on sys.path (no `pythonpath` entry for it). Not in X-001 scope; fix it when the gateway story lands or when integration tests get re-enabled.
+  - `uv sync` without `--extra dev` **removes** pytest/mypy/ruff. Always run with `--extra dev --extra macos` locally; the Ralph script should do the same.
+  - `LIVE_MODE_ENV_VAR` is exported from `runner.safety` as the single source of truth for the env-var name — do NOT hard-code `"TRACE_ALLOW_LIVE"` string literals elsewhere; import the constant.
+  - The three other service packages (recorder, synthesizer, gateway) still use the flat layout. Importing across modules (e.g., runner depending on synthesizer's `skill_doc` in X-004) will require either (a) moving synthesizer to src layout too, or (b) adding `services/synthesizer/synthesizer` to `pythonpath`. Decide at X-004 time.
+---
