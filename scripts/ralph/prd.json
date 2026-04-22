@@ -69,7 +69,7 @@
         "pytest passes"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "This is the locked contract. Changing it after Synthesizer or Runner have shipped requires coordinated changes. Keep it conservative — err toward required fields being optional if unsure. Adding required fields later is breaking; making optional fields required later is breaking too."
     },
     {

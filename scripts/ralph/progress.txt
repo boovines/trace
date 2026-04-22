@@ -13,6 +13,9 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - `uv run mypy --strict services/recorder`
   - `uv run pytest tests/recorder/`
 - Pre-existing gateway/integration test failures (`ModuleNotFoundError: gateway`) are NOT caused by R-001 and are outside this branch's scope — a future `feat/integration` story will install gateway as a proper package.
+- **Schema validation**: `recorder.schema` exposes `validate_event(event)` / `validate_metadata(meta)` backed by `jsonschema`'s Draft 2020-12 validator (with `FORMAT_CHECKER` enabled for `uuid`/`date-time`). Future writer/session code should call these before writing JSON to disk so bad events never land in `events.jsonl`.
+- **Schema file lookup**: `recorder.schema.find_schema_path()` walks up from `__file__` to find `contracts/trajectory.schema.json`. Works for the uv-workspace editable install. If the contracts ever move or get bundled into the wheel, update this function — do NOT hardcode a path.
+- **Local `$ref` only**: the `load_event_schema()` / `load_metadata_schema()` wrappers build standalone schemas with a `#/$defs/...` fragment ref (no `$id`), which keeps `jsonschema` from trying to HTTP-fetch the schema's `$id` URL at validate time. If you add new top-level sub-schemas for Synthesizer/Runner to reuse, follow the same pattern.
 
 ---
 
@@ -38,4 +41,20 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - `hatchling` with `packages = ["src/recorder"]` gives a clean editable install; no need for setuptools.
   - When adding a new PyObjC import (e.g. `import Quartz` in R-005), also ensure the module is listed in the mypy override block in root pyproject.toml, otherwise `mypy --strict` will fail on `Any`-returning calls.
   - Gateway already imports synthesizer/runner via `services.X.X.api` — keep those imports intact; only `recorder` moved to installed-package style in R-001.
+---
+
+## 2026-04-22 - R-002
+- Rewrote `contracts/trajectory.schema.json` as the locked R-002 contract: event shape `{seq, timestamp_ms, type, screenshot_ref, app, target, payload}` with per-type payload subschemas (click, keypress, scroll, app_switch, window_focus, text_input, keyframe, tap_reenabled) discriminated via `allOf` + `oneOf` on the `type` const. Metadata shape updated to `{id, label, started_at, stopped_at, display_info{width,height,scale_factor}, app_focus_history[{bundle_id,name,entered_at,exited_at}]}`.
+- Added `services/recorder/src/recorder/schema.py` with `find_schema_path`, `load_event_schema`, `load_metadata_schema`, `validate_event`, `validate_metadata` (Draft202012Validator + FORMAT_CHECKER for uuid/date-time).
+- Added `tests/recorder/test_schema.py` covering 8 valid events (one per type), 10 malformed events (missing required fields, unknown enum values, bad `screenshot_ref` pattern, extra top-level keys, `target` missing `frame`, seq=0, empty text_input), plus metadata happy-path / null-stopped_at / bad-uuid cases.
+- Files changed:
+  - `contracts/trajectory.schema.json` (rewritten)
+  - `services/recorder/src/recorder/schema.py` (new)
+  - `tests/recorder/test_schema.py` (new)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (24 tests).
+- **Learnings for future iterations:**
+  - `jsonschema.Draft202012Validator` does NOT validate `format` keywords by default — pass `format_checker=Draft202012Validator.FORMAT_CHECKER` to enforce `uuid`/`date-time`. Without it, `id: "not-a-uuid"` silently passes.
+  - If a sub-schema you build at runtime has an `$id` pointing at a non-resolvable URL (e.g. `https://trace.local/...`) and a `$ref` of the same URL, the `referencing` resolver will try to HTTP-fetch it and explode with `URLError`. Use a bare `#/$defs/...` fragment ref (no `$id`) to keep resolution purely local.
+  - For `oneOf` failures, the top-level `ValidationError.message` is the generic "not valid under any of the given schemas" — the specific field-level errors live in `err.context`. Tests asserting a specific needle must walk `.context` recursively (see `_collect_error_text` in `test_schema.py`).
+  - When Ralph adds R-003's writer, it should call `schema.validate_event` BEFORE `events.jsonl.write(...)` — that's the cheapest way to make "writing schema-invalid data" impossible at the module boundary.
 ---
