@@ -309,7 +309,7 @@
         "pytest passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Works with the same Screen Recording permission as the Recorder. If the user granted it during Module 1 setup, it carries over to Module 3."
     },
     {
