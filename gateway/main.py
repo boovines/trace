@@ -7,10 +7,10 @@ port for the Tauri app to talk to.
 from __future__ import annotations
 
 from fastapi import FastAPI
-
 from runner.api import router as runner_router
+from synthesizer.api import router as synthesizer_router
+
 from services.recorder.recorder.api import router as recorder_router
-from services.synthesizer.synthesizer.api import router as synthesizer_router
 
 app = FastAPI(title="Trace gateway", version="0.1.0")
 

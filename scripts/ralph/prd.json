@@ -165,7 +165,7 @@
         "pytest passes"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "This is where the Runner first depends on the Synthesizer's merged code. If parse_skill_md changes on the synthesizer side, this module breaks at integration time — that's the point of the contract."
     },
     {

@@ -1,0 +1,15 @@
+{
+  "slug": "notes_daily",
+  "version": "0.1.0",
+  "trajectory_ref": "00000000-0000-0000-0000-000000000005",
+  "created_at": "2026-04-22T00:00:00Z",
+  "parameters": [
+    {
+      "name": "template_body",
+      "type": "string",
+      "description": "Note body text.",
+      "default": "# Plan\n- "
+    }
+  ],
+  "destructive_steps": []
+}

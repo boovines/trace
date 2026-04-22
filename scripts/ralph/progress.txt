@@ -13,6 +13,11 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - `types-jsonschema` is in the shared dev extras so mypy --strict accepts `jsonschema` imports without module-level overrides.
 - Shared contracts that need validation beyond JSON Schema (e.g. list-length, lowercase) live at the repo root under `contracts/` and are policed by `scripts/check_contracts.sh`. Runtime code loads them through a module in `runner.*` with `@lru_cache(maxsize=1)`; the schema path is computed from `Path(__file__).resolve().parents[4]` (for `services/runner/src/runner/*.py`).
 - Non-ASCII literals in tests (fullwidth letters, NBSP) should be written as `\uXXXX` escape sequences, not pasted as glyphs — ruff's RUF001 flags ambiguous characters and breaks lint otherwise.
+- The synthesizer package is now importable at the top level as `synthesizer.*` (not `services.synthesizer.synthesizer.*`). `services/synthesizer` is on both pytest `pythonpath` and mypy `mypy_path`. The recorder is still flat-layout and reached as `services.recorder.recorder.*` until its own X-001-equivalent story lands. Gateway uses `from synthesizer.api import ...` to match.
+- Cross-module typechecking: leaving `services/synthesizer/synthesizer` out of mypy `files` while keeping it on `mypy_path` avoids the "source file found twice" ambiguity. Synthesizer code still gets strict-checked because the runner imports it and mypy follows those imports.
+- SKILL.md format (locked by X-004 parser): a `# Title` line, a `## Steps` section whose body is `N. text` lines (1-based, contiguous). Destructive steps begin with `⚠️ ` (fully qualified) or `⚠ ` (bare). The parser strips the marker from `.text` and sets `destructive=True`. Prose between title and `## Steps` is ignored but preserved on disk.
+- Skill meta/markdown semantic check lives in `synthesizer.schema.validate_meta_against_markdown` — it enforces that `meta.destructive_steps` is exactly the set of `⚠️`-marked step numbers (symmetric: either-direction drift is an error).
+- Parameter substitution: `meta.parameters[*]` is the declaration. A parameter is required iff it has NO `default` key at all OR `default` is `null`. Unknown parameters from the caller raise `UnknownParameterError`. Escaped braces `\{` / `\}` survive substitution as literal `{` / `}`. Non-string defaults (e.g. integer `30`) are stringified via `str()` before substitution.
 
 ---
 
@@ -60,4 +65,21 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - The regex pattern joins keywords sorted by length desc so the alternation prefers longer matches first; with `\b` boundaries today this is not observable with the current list, but it protects future additions like `unshare` vs `share`.
   - The `types-jsonschema` note from X-002 continues to apply; no new mypy overrides were needed for the `re`/`unicodedata` stdlib imports.
   - If the synthesizer eventually ships destructive_matcher on its branch, resolve the cross-module import by giving synthesizer its own import of the `contracts/destructive_keywords.json` file rather than importing `runner.destructive` — keeps the two services from depending on each other at runtime.
+---
+
+## 2026-04-22 - X-004 - Skill loader: parse SKILL.md + meta + parameter substitution
+- Added `services/synthesizer/synthesizer/skill_doc.py` (SKILL.md parser + `ParsedSkill`/`SkillStep` frozen dataclasses) and `services/synthesizer/synthesizer/schema.py` (`validate_meta_against_markdown`). These live on the synthesizer branch long-term; the feat/runner branch ships a minimal version to unblock the runner per X-001 decision (b): put `services/synthesizer` on pythonpath and mypy_path rather than copy-pasting the parser.
+- Added `services/runner/src/runner/skill_loader.py` exposing `LoadedSkill`, `load_skill(slug, skills_root)`, `substitute_parameters(skill, params)`, and the four error classes `SkillNotFoundError` / `SkillIntegrityError` / `MissingParameterError` / `UnknownParameterError`.
+- Updated root `pyproject.toml`: added `services/synthesizer` to pytest `pythonpath` and mypy `mypy_path`. Kept mypy `files` unchanged (no direct listing) to avoid the "source file found twice" error that would arise from combining a mypy_path entry with the same directory as a files entry.
+- Updated `gateway/main.py` to `from synthesizer.api import router as synthesizer_router` (the old `services.synthesizer.synthesizer.api` dotted path produced a mypy path clash once `synthesizer` was on mypy_path).
+- Authored 5 golden fixture skills under `fixtures/skills/` — gmail_reply, calendar_block, finder_organize, slack_status, notes_daily — each with a strict-format SKILL.md and a schema-valid skill.meta.json. calendar_block, finder_organize, slack_status use defaults; gmail_reply is all-required; notes_daily has no destructive step.
+- Added `tests/runner/test_skill_loader.py` — 28 cases covering: all 5 golden fixtures load clean; missing directory/meta/markdown; malformed/array meta; schema violations (missing required, bad slug pattern); markdown↔meta drift in both directions; malformed markdown (no title, no Steps, non-contiguous); substitution with all/missing/unknown/default-only params; default override; numeric default coercion to string; escaped `\{` / `\}`; `"default": null` counts as required; step-number and destructive-flag preservation.
+- Quality gates: `uv run ruff check services gateway tests` clean; `uv run mypy --strict` clean (9 source files); `uv run pytest tests/runner/` → 158 passed; `scripts/check_contracts.sh` ok.
+- **Learnings for future iterations:**
+  - When a module's parent directory is on `mypy_path` AND the same directory appears in mypy `files`, mypy sees the files under two module names and errors out. Fix: keep the parent on `mypy_path` only; rely on `follow_imports` to type-check the module transitively via its callers.
+  - pytest's `pythonpath` accepts a list; to add synthesizer alongside runner, list both entries: `["services/runner/src", "services/synthesizer"]`.
+  - The SKILL.md parser needs to accept BOTH `⚠️ ` (⚠ + variation selector + space, the fully-qualified form) AND `⚠ ` (bare, no VS). Some editors strip the variation selector silently on save.
+  - `replace_step_text` helper exists in `synthesizer.skill_doc` because `SkillStep` is frozen — callers performing substitution must use it or `dataclasses.replace` rather than mutating.
+  - `default: null` in skill.meta.json is treated as "no default" (i.e. required). Otherwise JSON serialization of undefined values could silently change required-ness.
+  - `_VALID_MD` in test_skill_loader.py uses `meta = _valid_meta() | {"destructive_steps": []}` to override the default destructive set for "no marker" tests — `dict | dict` is Python 3.9+ syntax and works cleanly for meta overrides.
 ---

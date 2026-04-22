@@ -44,7 +44,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["services/runner/src", "gateway"]
-mypy_path = "services/runner/src"
+mypy_path = "services/runner/src:services/synthesizer"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -54,4 +54,4 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["services/runner/src"]
+pythonpath = ["services/runner/src", "services/synthesizer"]
