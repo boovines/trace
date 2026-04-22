@@ -1,0 +1,10 @@
+[project]
+name = "trace-synthesizer"
+version = "0.1.0"
+description = "Trace Module 2: turns a trajectory into a SKILL.md via Claude."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.8",
+    "anthropic>=0.40",
+]

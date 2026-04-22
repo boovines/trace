@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trace.local/contracts/skill-meta.schema.json",
+  "title": "SkillMeta",
+  "description": "Shape of skill.meta.json. SKILL.md is the human-readable sibling; this file is the machine-readable one the Runner consumes.",
+  "type": "object",
+  "required": ["slug", "version", "trajectory_ref", "parameters", "destructive_steps", "created_at"],
+  "properties": {
+    "slug": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+    "version": { "type": "string" },
+    "trajectory_ref": { "type": "string", "description": "UUID of the source trajectory" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "type"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
+          "type": { "type": "string", "enum": ["string", "number", "boolean", "date"] },
+          "description": { "type": "string" },
+          "default": {}
+        }
+      }
+    },
+    "destructive_steps": {
+      "type": "array",
+      "description": "1-based indices of SKILL.md steps that require confirmation before execution.",
+      "items": { "type": "integer", "minimum": 1 }
+    },
+    "preview_screenshots": {
+      "type": "array",
+      "items": { "type": "string", "description": "Relative path under preview/" }
+    }
+  }
+}

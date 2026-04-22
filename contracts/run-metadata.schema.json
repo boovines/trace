@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trace.local/contracts/run-metadata.schema.json",
+  "title": "RunMetadata",
+  "description": "Shape of run_metadata.json produced by the Runner.",
+  "type": "object",
+  "required": ["run_id", "skill_slug", "skill_version", "started_at", "status", "parameters", "dry_run"],
+  "properties": {
+    "run_id": { "type": "string", "format": "uuid" },
+    "skill_slug": { "type": "string" },
+    "skill_version": { "type": "string" },
+    "started_at": { "type": "string", "format": "date-time" },
+    "finished_at": { "type": "string", "format": "date-time" },
+    "status": {
+      "type": "string",
+      "enum": ["running", "awaiting_confirmation", "completed", "aborted", "failed"]
+    },
+    "dry_run": { "type": "boolean" },
+    "parameters": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "abort_reason": { "type": "string" },
+    "token_usage": {
+      "type": "object",
+      "properties": {
+        "input": { "type": "integer", "minimum": 0 },
+        "output": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,0 +1,3 @@
+# progress.txt — Ralph's append-only learnings log
+# One entry per line or short block. Patterns that worked, gotchas, decisions
+# not captured in prd.json. Do not edit past entries.
