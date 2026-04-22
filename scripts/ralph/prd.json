@@ -230,7 +230,7 @@
         "pytest passes"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "This is the LLM-heaviest story. The prompt is load-bearing — iterate on it against the fake-mode canned responses, then do ONE real-mode run per reference trajectory to validate the prompt works on the real API (this real-mode run is part of S-017, not this story). The two retry hooks (JSON parse, markdown parse) are cheap insurance against model drift and should not be removed."
     },
     {

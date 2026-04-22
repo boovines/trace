@@ -90,12 +90,17 @@ class LLMResponse:
 
     ``raw`` holds the original Anthropic response payload (or the canned dict in
     fake mode) for callers that need fields beyond the normalized surface.
+    ``cost_estimate_usd`` matches the value written to ``costs.jsonl`` for this
+    call — always ``0.0`` in fake mode, even when the request model would
+    otherwise be priced — so callers that accumulate cost across multiple
+    calls see a figure that matches what's billed.
     """
 
     text: str
     stop_reason: str | None
     input_tokens: int
     output_tokens: int
+    cost_estimate_usd: float
     raw: Mapping[str, Any]
 
 
@@ -328,6 +333,7 @@ class LLMClient:
             stop_reason=data.get("stop_reason"),
             input_tokens=int(data.get("input_tokens", 0)),
             output_tokens=int(data.get("output_tokens", 0)),
+            cost_estimate_usd=0.0,
             raw=data,
         )
         _append_cost_line(
@@ -377,11 +383,15 @@ class LLMClient:
         else:
             raw = {"id": getattr(message, "id", None)}
 
+        cost = estimate_cost_usd(
+            model=model, input_tokens=input_tokens, output_tokens=output_tokens
+        )
         response = LLMResponse(
             text=text,
             stop_reason=getattr(message, "stop_reason", None),
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            cost_estimate_usd=cost,
             raw=raw,
         )
         _append_cost_line(
@@ -391,9 +401,7 @@ class LLMClient:
                 "model": model,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "cost_estimate_usd": estimate_cost_usd(
-                    model=model, input_tokens=input_tokens, output_tokens=output_tokens
-                ),
+                "cost_estimate_usd": cost,
                 "context_label": context_label,
             }
         )

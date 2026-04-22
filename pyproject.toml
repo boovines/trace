@@ -37,6 +37,12 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# draft_prompt.py embeds the full LLM system prompt as a multi-line string;
+# prose paragraphs regularly exceed 100 chars and hard-wrapping them would
+# only obscure the content the model actually sees.
+"services/synthesizer/src/synthesizer/draft_prompt.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
