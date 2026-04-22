@@ -1,3 +1,41 @@
 # Ralph Progress Log
 Started: Wed Apr 22 15:33:38 EDT 2026
+
+## Codebase Patterns
+- `services/recorder` uses a **src layout** (`services/recorder/src/recorder/…`); future files (schema.py, writer.py, session.py, etc.) go under `src/recorder/`.
+- The recorder package is installed as a uv workspace member (`trace-recorder`) and should be imported as `from recorder.xyz import …`, NOT `services.recorder.recorder.xyz`.
+- Root `pyproject.toml` owns shared tooling config (ruff/mypy/pytest); per-service `pyproject.toml` only declares that service's runtime deps + hatchling build.
+- Ruff's isort needs `known-first-party = ["recorder", "synthesizer", "runner", "gateway"]` or it misgroups the workspace imports in gateway/main.py.
+- PyObjC wheels only exist for macOS — deps are marked `; sys_platform == 'darwin'` so `uv sync` still works if Ralph ever runs on non-darwin.
+- `mypy --strict` has PyObjC module overrides in root pyproject (`Cocoa.*`, `Quartz.*`, `ApplicationServices.*`, `AppKit.*`, `Foundation.*`, `objc.*`); add new PyObjC module imports here, not in each file.
+- Quality-gate commands for the recorder module are:
+  - `uv run ruff check services/recorder`
+  - `uv run mypy --strict services/recorder`
+  - `uv run pytest tests/recorder/`
+- Pre-existing gateway/integration test failures (`ModuleNotFoundError: gateway`) are NOT caused by R-001 and are outside this branch's scope — a future `feat/integration` story will install gateway as a proper package.
+
+---
+
+## 2026-04-22 - R-001
+- Moved `services/recorder/recorder/` → `services/recorder/src/recorder/` (src layout per AC).
+- Added `services/recorder/src/recorder/__main__.py` for standalone `python -m recorder` dev runs.
+- Rewrote `services/recorder/pyproject.toml`: added fastapi, uvicorn, pydantic, jsonschema, PyObjC (darwin-gated) deps; added hatchling build backend pointing at `src/recorder`.
+- Updated root `pyproject.toml`: added `trace-recorder` workspace source, dev deps (pytest, pytest-asyncio, httpx, mypy, ruff, types-jsonschema), ruff known-first-party config, mypy_path for recorder src, broader PyObjC mypy overrides.
+- Updated `gateway/main.py` to import `from recorder.api import router` (installed package, not filesystem path).
+- Replaced `tests/recorder/.gitkeep` with `__init__.py` + `conftest.py` + `test_scaffold.py` placeholder that asserts `recorder.__version__`.
+- Files changed:
+  - `pyproject.toml`
+  - `services/recorder/pyproject.toml`
+  - `services/recorder/src/recorder/{__init__.py,__main__.py,api.py}` (new)
+  - `services/recorder/recorder/{__init__.py,api.py}` (deleted)
+  - `gateway/main.py`
+  - `tests/recorder/{__init__.py,conftest.py,test_scaffold.py}` (new)
+  - `tests/recorder/.gitkeep` (deleted)
+- Quality gates: ruff/mypy/pytest all green on services/recorder + tests/recorder; full-repo ruff also clean.
+- **Learnings for future iterations:**
+  - `uv sync --extra dev` is the command to pull dev tooling; plain `uv sync` skips it.
+  - `pytest` returns exit code 5 on zero-collection — the AC wanted exit 0, so added a placeholder test. Future stories can keep or replace it; don't accidentally regress to zero tests.
+  - `hatchling` with `packages = ["src/recorder"]` gives a clean editable install; no need for setuptools.
+  - When adding a new PyObjC import (e.g. `import Quartz` in R-005), also ensure the module is listed in the mypy override block in root pyproject.toml, otherwise `mypy --strict` will fail on `Any`-returning calls.
+  - Gateway already imports synthesizer/runner via `services.X.X.api` — keep those imports intact; only `recorder` moved to installed-package style in R-001.
 ---

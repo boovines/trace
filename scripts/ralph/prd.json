@@ -49,7 +49,7 @@
         "uv run pytest tests/recorder/ exits 0 with 'no tests collected' — tests directory must exist"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Foundation story. No functional code. Every later Ralph iteration depends on these commands working. Do NOT add application code in this story — keep it purely scaffolding."
     },
     {
