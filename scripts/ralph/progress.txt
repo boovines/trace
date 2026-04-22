@@ -22,6 +22,9 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **Ruff SIM105**: prefer `with contextlib.suppress(OSError): os.fsync(...)` over `try/except/pass` for best-effort fsync on filesystems that don't support it (tmpfs in pytest tmp_path).
 - **PyObjC mocking in tests**: for any module that does `from ApplicationServices import X` / `from Quartz import Y` inside a function, tests stub the framework by installing a `types.ModuleType("Quartz")` / `types.ModuleType("ApplicationServices")` into `sys.modules` via `monkeypatch.setitem`. The import inside the tested function then resolves to the stub. For ImportError coverage, install a stub that is missing the expected attributes — `from X import missing_attr` raises ImportError, which the module under test should catch.
 - **Permission-check pattern**: `recorder.permissions` keeps each macOS framework call in its own thin `_check_*` helper, and `check_permissions()` / `get_missing_permissions_error()` simply compose them. Tests patch the helpers for combination coverage and patch the PyObjC symbols inside `sys.modules` for helper-level coverage. Use the same pattern for any future PyObjC-backed module (event_tap, ax_resolver, focus_tracker, screenshot) to keep the suite hermetic on Ralph's sandbox.
+- **`@pytest.mark.macos` is opt-in only**: `tests/recorder/conftest.py` auto-skips every test tagged `macos` unless `TRACE_RUN_MACOS_TESTS=1` is set. Use this marker for ANY test that needs real PyObjC framework behaviour (CGEventTap, AXUIElement, CGWindowListCreateImage, etc.). Hermetic unit coverage should still be provided alongside via `sys.modules`-stubbed Quartz/ApplicationServices so the default run stays green.
+- **Splitting PyObjC callback from normaliser**: for modules driven by a C-callback (CGEventTap), put the pure event→dict conversion in a module-level function that takes the framework module as a parameter (`_normalise_event(code, event, quartz)`), and expose a thin `handle_cg_event(code, event)` method on the class that the tap callback delegates to. Tests exercise the normaliser + re-enable logic by calling `handle_cg_event` with fake events — no run-loop or thread needed. `event_tap.py` is the reference implementation.
+- **Re-enabling a disabled tap**: `CGEventTapEnable(tap, True)` re-arms a tap the OS disabled via `kCGEventTapDisabledByTimeout` / `kCGEventTapDisabledByUserInput`. Both constants appear as unsigned `uint32` (0xFFFFFFFE / 0xFFFFFFFF) in headers but PyObjC sometimes surfaces them as signed ints (-2 / -1); match both forms.
 
 ---
 
@@ -111,4 +114,39 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - `AXIsProcessTrustedWithOptions` must be invoked with `kAXTrustedCheckOptionPrompt: False` to suppress the system prompt. Tests assert this option is set on the passed dict — do not relax it, or `check_permissions()` could start surfacing the system prompt during polling.
   - The canonical ordering of permissions in `get_missing_permissions_error()` matters for UI consistency — tests lock it in.
   - Ralph's sandbox may have PyObjC installed (on darwin) but not have the permissions granted, so a real call to `_check_input_monitoring()` may legitimately return False there. Do not write tests that assume True without the framework-level mock.
+---
+
+## 2026-04-22 - R-005
+- Added `services/recorder/src/recorder/event_tap.py` exposing `EventTap` — a passive global CGEventTap running its own `CFRunLoop` on a dedicated `threading.Thread`.
+  - `kCGHIDEventTap` + `kCGEventTapOptionListenOnly` (never modifies events).
+  - Event mask covers left/right/other mouse down+up, key down+up, flags changed, scroll wheel. Mouse-moved (type 5) is deliberately excluded to keep storage sane.
+  - Normaliser `_normalise_event(code, event, quartz)` produces a JSON-friendly dict with `cg_event_type`, `timestamp_ms`, `location_{x,y}`, `modifiers` (decoded from CGEventFlags), `flags_raw`, and per-type `key_code` / `scroll_delta_{x,y}` fields. Each framework call is individually try/except'd so a PyObjC failure on one field does not drop the whole event.
+  - `handle_cg_event(code, event)` detects `kCGEventTapDisabledByTimeout` / `kCGEventTapDisabledByUserInput` (both unsigned 0xFFFFFFFE/0xFFFFFFFF and signed -2/-1 forms) and re-arms via `CGEventTapEnable(tap, True)`, surfacing a synthetic `{"cg_event_type": "tap_reenabled", "reason": ...}` dict through the callback.
+  - `start(start_timeout=5.0)` blocks until the tap thread has created+enabled the tap (or fails with a clear `RuntimeError` — permission-denied case when `CGEventTapCreate` returns NULL is called out in the error string). `stop()` disables the tap, calls `CFRunLoopStop`, and joins with a 2s timeout; idempotent.
+  - Consumer callback exceptions are logged and swallowed — one buggy consumer never tears down capture (belt-and-suspenders for the session orchestrator).
+- Added `tests/recorder/test_event_tap.py` (17 hermetic tests + 1 opt-in macOS integration test):
+  - Event mask coverage assertions.
+  - `_modifiers_from_flags` empty / combined / unknown-bits-ignored.
+  - `_normalise_event` for click / key_down / scroll / unknown type / framework-raises.
+  - `handle_cg_event` delivery, reenable-on-timeout, reenable-on-user-input (signed form), suppression while stopping, callback-exception isolation.
+  - `start/stop` round trip via a stubbed Quartz whose `CFRunLoopRun` blocks on a `threading.Event` until `CFRunLoopStop` sets it.
+  - Start-twice raises; tap-create returning NULL raises a permission-referencing RuntimeError.
+  - `@pytest.mark.macos test_macos_real_tap_receives_synthesised_click` posts a synthetic CGEvent and asserts delivery (skipped by default; opt-in via `TRACE_RUN_MACOS_TESTS=1`).
+- Added `tests/recorder/conftest.py` auto-skip for the `macos` marker unless `TRACE_RUN_MACOS_TESTS=1`, and `tests/recorder/README.md` documenting how a human grants Accessibility / Input Monitoring / Screen Recording permissions and runs the macOS tests.
+- Registered the `macos` marker in root `pyproject.toml` so pytest does not warn on unknown markers.
+- Files changed:
+  - `services/recorder/src/recorder/event_tap.py` (new)
+  - `tests/recorder/test_event_tap.py` (new)
+  - `tests/recorder/conftest.py` (added macOS skip hook)
+  - `tests/recorder/README.md` (new)
+  - `pyproject.toml` (macos marker declaration)
+  - `scripts/ralph/prd.json` (R-005 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (76 passed, 1 skipped — the opt-in macOS test).
+- **Learnings for future iterations:**
+  - CoreGraphics constants like `kCGEventTapDisabledByTimeout` are declared `uint32_t` but PyObjC may surface them as signed ints on some macOS/PyObjC combinations. Match both `0xFFFFFFFE` and `-2` (and `0xFFFFFFFF` / `-1`). Same trick will apply to any CoreFoundation constant where PyObjC's type coercion is surprising.
+  - A CGEventTap is inert until `CGEventTapEnable(tap, True)` runs AND the tap's run-loop source is attached to a live CFRunLoop. `CGEventTapCreate` returning non-NULL does not mean events will flow. Tests that just check the return value are not enough; the run-loop must be spun.
+  - Running `CFRunLoopRun()` on a non-main thread works for event taps (we do not need the main CFRunLoop). `CFRunLoopGetCurrent()` returns the per-thread loop; attaching the tap source there is what routes events.
+  - In the Ralph sandbox, `CGEventPost` does not deliver through the tap even when the tap reports "enabled" — so a real-delivery integration test must be opt-in (TRACE_RUN_MACOS_TESTS=1). Attempting to assert delivery in Ralph will always fail.
+  - When stubbing Quartz for `start()`/`stop()`, you must provide: `CGEventTapCreate`, `CFMachPortCreateRunLoopSource`, `CFRunLoopGetCurrent`, `CFRunLoopAddSource`, `CFRunLoopRemoveSource`, `CGEventTapEnable`, `CFRunLoopRun` (blocking), `CFRunLoopStop` (releases the block), plus the `kCGHIDEventTap` / `kCGHeadInsertEventTap` / `kCGEventTapOptionListenOnly` / `kCFRunLoopCommonModes` sentinels. See `_install_runloop_stub_quartz` in test_event_tap.py for the pattern — reuse when adding CFRunLoop-driven modules (focus_tracker NSWorkspace notifications, screen-capture streams).
+  - Mouse-moved events (CGEventType 5) are intentionally excluded from the mask. If a future story needs drag-path fidelity, add it there and document the storage cost; do not silently re-enable.
 ---

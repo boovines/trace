@@ -61,3 +61,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "macos: integration tests that require a real macOS host with Accessibility/Input Monitoring permissions granted; skipped by default off-darwin or without permissions.",
+]

@@ -131,7 +131,7 @@
         "ruff check passes"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "This is the most PyObjC-heavy story. Ralph may struggle with PyObjC signatures — if stuck, consult Apple's CGEventTap docs and the pyobjc-framework-Quartz source for exact function bindings. The integration test requires Accessibility permission; document this in tests/recorder/README.md so the human tester can grant it."
     },
     {
