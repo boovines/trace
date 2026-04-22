@@ -11,6 +11,8 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - JSON schemas in `contracts/` are the on-disk contract; the runner pairs each with a pydantic model in `runner.schema` (e.g. `RunMetadata`) for typed in-memory use. Both must agree — `extra="forbid"` on the model mirrors `additionalProperties: false` on the schema. Round-tripping uses `model_dump(mode="json", exclude_unset=True)` so unset optional fields do not leak back as nulls.
 - Pydantic v2 serializes UTC datetimes with a trailing `Z` (not `+00:00`) via `mode="json"`. Tests that assert round-trip identity must store the canonical `Z` form in fixtures.
 - `types-jsonschema` is in the shared dev extras so mypy --strict accepts `jsonschema` imports without module-level overrides.
+- Shared contracts that need validation beyond JSON Schema (e.g. list-length, lowercase) live at the repo root under `contracts/` and are policed by `scripts/check_contracts.sh`. Runtime code loads them through a module in `runner.*` with `@lru_cache(maxsize=1)`; the schema path is computed from `Path(__file__).resolve().parents[4]` (for `services/runner/src/runner/*.py`).
+- Non-ASCII literals in tests (fullwidth letters, NBSP) should be written as `\uXXXX` escape sequences, not pasted as glyphs — ruff's RUF001 flags ambiguous characters and breaks lint otherwise.
 
 ---
 
@@ -44,4 +46,18 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - The JSON schema uses `minimum: 0` on numeric fields (tokens, cost, final_step_reached, confirmation_count). Mirror that on the pydantic side with `Field(ge=0)` — the two layers must agree or a hand-edited file can pass one validator and fail the other.
   - The schema path resolves from `Path(__file__).resolve().parents[4]` (4 ups from `services/runner/src/runner/schema.py` gets to repo root). If the runner moves deeper into the tree, update the parents index.
   - `@lru_cache(maxsize=1)` on `load_run_metadata_schema` and `_validator` avoids re-reading the schema on every run_metadata.json write, which RunWriter (X-005) will do constantly.
+---
+
+## 2026-04-22 - X-003 - Shared destructive keywords source of truth
+- Created `contracts/destructive_keywords.json` — JSON array of the 14 locked keywords (send, submit, delete, remove, publish, post, purchase, pay, buy, transfer, confirm, authorize, approve, share) sourced from `scripts/ralph/prd.json:39-53`.
+- Added `services/runner/src/runner/destructive.py` with `load_destructive_keywords() -> frozenset[str]` (lru_cache) and `matches_destructive_keyword(text: str) -> bool` (NFKC-normalise, word-boundary, case-insensitive). Compiled regex is also lru_cached and keywords are sorted longest-first before joining.
+- Added `tests/runner/test_destructive.py` — 53 cases covering each keyword as a word boundary, 19 substring non-matches, multi-word text, uppercase, empty/whitespace, punctuation, None/non-string TypeError (parametrised), fullwidth NFKC, NBSP whitespace, and non-destructive sentences.
+- Added `scripts/check_contracts.sh` — asserts `destructive_keywords.json` is a JSON array with exactly 14 entries, all lowercase non-empty strings. Marked executable.
+- No synthesizer deduplication needed: `services/synthesizer/synthesizer/` currently only has `__init__.py` and `api.py`; S-008 has not shipped the destructive matcher on that branch yet. When it does, the synthesizer must import from `runner.destructive` (or we extract to a shared package).
+- Quality gates: `scripts/check_contracts.sh` ok; `uv run ruff check services/runner tests/runner` clean; `uv run mypy --strict services/runner` clean (6 source files); `uv run pytest tests/runner/` → 130 passed.
+- **Learnings for future iterations:**
+  - ruff's RUF001 "ambiguous character" check flags pasted fullwidth and NBSP glyphs in tests. Use `\uXXXX` escape sequences in string literals instead of pasting the raw character.
+  - The regex pattern joins keywords sorted by length desc so the alternation prefers longer matches first; with `\b` boundaries today this is not observable with the current list, but it protects future additions like `unshare` vs `share`.
+  - The `types-jsonschema` note from X-002 continues to apply; no new mypy overrides were needed for the `re`/`unicodedata` stdlib imports.
+  - If the synthesizer eventually ships destructive_matcher on its branch, resolve the cross-module import by giving synthesizer its own import of the `contracts/destructive_keywords.json` file rather than importing `runner.destructive` — keeps the two services from depending on each other at runtime.
 ---

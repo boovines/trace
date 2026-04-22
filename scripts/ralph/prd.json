@@ -134,7 +134,7 @@
         "pytest passes"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "This story has a cross-branch dependency: if S-008 shipped with a hardcoded list in the synthesizer, we DEDUPLICATE here and update the synthesizer to import from the shared file. Document the coordination in progress.txt."
     },
     {
