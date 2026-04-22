@@ -25,6 +25,8 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **`@pytest.mark.macos` is opt-in only**: `tests/recorder/conftest.py` auto-skips every test tagged `macos` unless `TRACE_RUN_MACOS_TESTS=1` is set. Use this marker for ANY test that needs real PyObjC framework behaviour (CGEventTap, AXUIElement, CGWindowListCreateImage, etc.). Hermetic unit coverage should still be provided alongside via `sys.modules`-stubbed Quartz/ApplicationServices so the default run stays green.
 - **Splitting PyObjC callback from normaliser**: for modules driven by a C-callback (CGEventTap), put the pure event→dict conversion in a module-level function that takes the framework module as a parameter (`_normalise_event(code, event, quartz)`), and expose a thin `handle_cg_event(code, event)` method on the class that the tap callback delegates to. Tests exercise the normaliser + re-enable logic by calling `handle_cg_event` with fake events — no run-loop or thread needed. `event_tap.py` is the reference implementation.
 - **Re-enabling a disabled tap**: `CGEventTapEnable(tap, True)` re-arms a tap the OS disabled via `kCGEventTapDisabledByTimeout` / `kCGEventTapDisabledByUserInput`. Both constants appear as unsigned `uint32` (0xFFFFFFFE / 0xFFFFFFFF) in headers but PyObjC sometimes surfaces them as signed ints (-2 / -1); match both forms.
+- **Bounded-time framework calls**: when a PyObjC call could block indefinitely (AX queries, inter-app RPC), wrap it with a daemon `threading.Thread` and a `threading.Event` set in a `finally`. The caller `event.wait(timeout)` — on timeout the worker thread just keeps living as a daemon. Do not rely on `Thread.join(timeout)` alone to tell "done" from "still running"; always use a separate event sentinel. See `ax_resolver.resolve_element_at` for the reference.
+- **PyObjC AX value shapes**: AX position/size attributes come back as one of three shapes depending on macOS/PyObjC version — native 2-tuple, bridged object with `.x/.y` or `.width/.height`, or raw `AXValueRef` that must be unwrapped via `AXValueGetValue(value, kAXValueCG{Point,Size}Type, None) -> (success, unpacked)`. Any new AX-consuming code should tolerate all three (see `_unpack_ax_value` in ax_resolver.py).
 
 ---
 
@@ -149,4 +151,33 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - In the Ralph sandbox, `CGEventPost` does not deliver through the tap even when the tap reports "enabled" — so a real-delivery integration test must be opt-in (TRACE_RUN_MACOS_TESTS=1). Attempting to assert delivery in Ralph will always fail.
   - When stubbing Quartz for `start()`/`stop()`, you must provide: `CGEventTapCreate`, `CFMachPortCreateRunLoopSource`, `CFRunLoopGetCurrent`, `CFRunLoopAddSource`, `CFRunLoopRemoveSource`, `CGEventTapEnable`, `CFRunLoopRun` (blocking), `CFRunLoopStop` (releases the block), plus the `kCGHIDEventTap` / `kCGHeadInsertEventTap` / `kCGEventTapOptionListenOnly` / `kCFRunLoopCommonModes` sentinels. See `_install_runloop_stub_quartz` in test_event_tap.py for the pattern — reuse when adding CFRunLoop-driven modules (focus_tracker NSWorkspace notifications, screen-capture streams).
   - Mouse-moved events (CGEventType 5) are intentionally excluded from the mask. If a future story needs drag-path fidelity, add it there and document the storage cost; do not silently re-enable.
+---
+
+## 2026-04-22 - R-006
+- Added `services/recorder/src/recorder/ax_resolver.py` exposing `resolve_element_at(x, y, *, timeout_seconds=0.2) -> ResolvedTarget | None`.
+  - Runs the AX work on a short-lived daemon thread and blocks with `threading.Event.wait(timeout)` so a hung AX server can never hang the caller for more than the timeout. Returns `None` on timeout with a warning log.
+  - `_resolve_element_at_sync` calls `AXUIElementCreateSystemWide()` + `AXUIElementCopyElementAtPosition(system_wide, x, y, None)` → `(err, element)`; any non-zero error or null element returns None.
+  - `_build_target` collects role / title / description / identifier / position+size. If the hit has no title AND no description, `_walk_for_label` walks up to `MAX_ANCESTOR_DEPTH=3` parents via `AXParent` and adopts the first ancestor label (description too if co-located). The hit's own role / ax_identifier / frame are preserved — only the name is promoted.
+  - `_get_frame` tolerates three PyObjC value shapes: bridged tuple `(x, y)`, object with `.x/.y` or `.width/.height`, or raw `AXValueRef` unwrapped via `AXValueGetValue(value, kAXValueCG{Point,Size}Type, None) -> (success, unpacked)`.
+  - Every framework call is individually try/except'd; AX errors never escape the module (AC "never raises past the module boundary").
+  - `ResolvedTarget` TypedDict is schema-compatible — `frame` required, other fields nullable. If position+size extraction fails, the whole target is reported as None (AC "frame is always present when a target is returned").
+- Added `tests/recorder/test_ax_resolver.py` (16 hermetic tests + 1 opt-in macOS integration):
+  - Happy-path structured return, miss → None, AX error code → None, missing frame → None, ImportError on ApplicationServices → None.
+  - Missing optional fields become `None` (not empty string) in the returned dict.
+  - Ancestor walk: promotes parent label at depth-1, stops exactly at MAX_ANCESTOR_DEPTH=3, skipped when hit already has a label, skipped when hit has only a description.
+  - Timeout: a slow `AXUIElementCreateSystemWide` stub that sleeps 0.5s is cancelled inside a 0.05s budget.
+  - Error isolation: framework-raises and attribute-copy-raises return None cleanly.
+  - Frame unpacking: attribute-bearing objects (`.x/.y` / `.width/.height`), AXValueRef+AXValueGetValue `(True, unpacked)` path.
+  - `@pytest.mark.macos test_macos_real_resolve_hits_finder_menu_bar` resolves screen (2, 2) — the Apple menu — on a real Mac with Accessibility granted.
+- Files changed:
+  - `services/recorder/src/recorder/ax_resolver.py` (new)
+  - `tests/recorder/test_ax_resolver.py` (new)
+  - `scripts/ralph/prd.json` (R-006 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (92 passed, 2 skipped — the opt-in macOS tests for event_tap + ax_resolver).
+- **Learnings for future iterations:**
+  - `AXUIElementCopyAttributeValue(element, attr, None)` returns `(error, value)` in PyObjC. Always check error != 0 OR value is None — both mean "not available". Tests should model the same convention so the code path for "attribute missing" is actually exercised.
+  - PyObjC may surface CGPoint/CGSize as either a native tuple, a bridged object with `.x`/`.y` / `.width`/`.height`, or as an opaque `AXValueRef` that needs `AXValueGetValue(value, kAXValueCGPointType, None)` — which itself returns `(success, unpacked)` on PyObjC. Handle all three shapes; real-world AX responses differ per macOS version and per target app.
+  - Bounded-time AX work: `threading.Thread` + `Event.wait(timeout)` is sufficient and simpler than `concurrent.futures` for fire-and-forget short calls. The thread is daemon, so if it stays stuck on a misbehaving AX server, it just dies with the process instead of leaking. Do NOT use `thread.join(timeout)` alone as the signal — on timeout the returned thread is still alive and you cannot distinguish "finished" from "dead" without a separate sentinel. Use a `threading.Event` set in a `finally` block.
+  - The resolver preserves the HIT element's role/identifier/frame and only borrows the parent's label when walking — the click coordinate's semantic position should not change just because we found a nicer name.
+  - When adopting `str()` on an AX value, handle empty strings: they should be treated as "unknown" (returned as None). AX often reports empty strings rather than nil for missing titles, and passing an empty label downstream confuses synthesis prompts.
 ---

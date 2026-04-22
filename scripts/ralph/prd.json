@@ -152,7 +152,7 @@
         "ruff check passes"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Many apps have shallow AX trees (especially Electron apps pre-2023). The ancestor walk is critical. If a Ralph iteration gets stuck on PyObjC AX bindings, check ApplicationServices.AXUIElementCopyAttributeValue signatures in the pyobjc source — the return tuple (error_code, value) trips people up."
     },
     {
