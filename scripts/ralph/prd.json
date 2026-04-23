@@ -338,7 +338,7 @@
         "pytest passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "In-memory session state is acceptable for v1 (single-user local app). Do NOT introduce a session database — it's overkill. The draft.json persistence on disk is a defense against losing user work on a synthesizer service crash, not a full resume mechanism."
     },
     {
