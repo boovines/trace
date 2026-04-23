@@ -31,6 +31,18 @@
     "preview_screenshots": {
       "type": "array",
       "items": { "type": "string", "description": "Relative path under preview/" }
+    },
+    "runtime_limits": {
+      "type": "object",
+      "description": "Optional per-skill override of the runner's default RunBudget. Any field omitted falls back to the runner default.",
+      "additionalProperties": false,
+      "properties": {
+        "max_input_tokens": { "type": "integer", "minimum": 1 },
+        "max_output_tokens": { "type": "integer", "minimum": 1 },
+        "max_wall_clock_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "max_actions_per_minute": { "type": "integer", "minimum": 1 },
+        "max_total_actions": { "type": "integer", "minimum": 1 }
+      }
     }
   }
 }
