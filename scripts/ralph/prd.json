@@ -580,7 +580,7 @@
         "pytest passes"
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": "The 2-second target comes from CLAUDE.md safety invariants. The main risk is a blocking PyObjC call in the input adapter that can't be interrupted \u2014 mitigation is that the adapter is only called between turns, so we can check the kill signal before each adapter call."
     },
     {

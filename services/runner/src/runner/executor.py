@@ -58,12 +58,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import logging
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 from uuid import UUID
 
-from runner.agent_runtime import AgentRuntime, Message
+from runner.agent_runtime import AgentResponse, AgentRuntime, Message
 from runner.budget import (
     BudgetReason,
     BudgetStatusKind,
@@ -79,6 +80,7 @@ from runner.coords import DryRunDisplayInfo, ImageMapping
 from runner.dispatcher import dispatch_tool_call
 from runner.execution_prompt import build_execution_prompt
 from runner.input_adapter import InputAdapter
+from runner.kill_switch import KillSwitch
 from runner.parser import (
     ConfirmationRequest as ParserConfirmationRequest,
 )
@@ -104,6 +106,7 @@ logger = logging.getLogger(__name__)
 UNKNOWN_ACTION_ABORT_THRESHOLD: Final[int] = 4
 AGENT_STUCK_REASON: Final[str] = "agent_stuck"
 USER_ABORT_REASON: Final[str] = "user_abort"
+KILL_SWITCH_REASON: Final[str] = "kill_switch"
 DEFAULT_TARGET_LONGEST_EDGE: Final[int] = 1568
 
 
@@ -174,6 +177,7 @@ class Executor:
         confirmation_queue: ConfirmationQueue,
         run_id: str,
         confirmation_timeout_seconds: float = DEFAULT_CONFIRMATION_TIMEOUT_SECONDS,
+        kill_switch: KillSwitch | None = None,
     ) -> None:
         self._loaded_skill = loaded_skill
         self._parameters = dict(parameters)
@@ -187,6 +191,8 @@ class Executor:
         self._confirmation_queue = confirmation_queue
         self._run_id = run_id
         self._confirmation_timeout_seconds = confirmation_timeout_seconds
+        self._kill_switch = kill_switch
+        self._kill_event: asyncio.Event | None = None
 
         self._event_seq = 0
         self._screenshot_seq = 0
@@ -204,6 +210,37 @@ class Executor:
     async def run(self) -> RunMetadata:
         """Execute the run to completion and return the final metadata."""
 
+        if self._kill_switch is not None:
+            self._kill_event = self._kill_switch.register(self._run_id)
+            if self._kill_event.is_set():
+                return await self._run_killed_before_start()
+
+        try:
+            return await self._run_body()
+        finally:
+            if self._kill_switch is not None:
+                self._kill_switch.unregister(self._run_id)
+            self._writer.close()
+
+    async def _run_killed_before_start(self) -> RunMetadata:
+        """Finalize without ever hitting the LLM when kill fired pre-run."""
+
+        self._started_at = _now_utc()
+        metadata = RunMetadata(
+            run_id=UUID(self._run_id),
+            skill_slug=str(self._loaded_skill.meta["slug"]),
+            started_at=self._started_at,
+            ended_at=None,
+            status="running",
+            mode=self._mode,
+            parameters=self._parameters if self._parameters else None,
+        )
+        self._writer.write_metadata(metadata)
+        reason = self._kill_reason_or_default()
+        decision = ConfirmationDecision(action="abort", reason=reason)
+        return self._finalize_aborted(metadata, decision)
+
+    async def _run_body(self) -> RunMetadata:
         resolved_skill = substitute_parameters(
             self._loaded_skill, self._parameters
         )
@@ -264,15 +301,21 @@ class Executor:
         metadata: RunMetadata,
     ) -> RunMetadata:
         while True:
+            if self._kill_triggered():
+                return self._finalize_aborted_by_kill(metadata)
+
             rate_limit_result = await self._check_and_wait_rate_limit()
             if rate_limit_result is not None:
                 return self._finalize_budget_exceeded(
                     metadata, rate_limit_result
                 )
 
-            response = await self._agent_runtime.run_turn(
+            turn_result = await self._run_turn_cancellable(
                 system_prompt, messages
             )
+            if turn_result is None:
+                return self._finalize_aborted_by_kill(metadata)
+            response = turn_result
             self._budget.record_turn(
                 response.input_tokens, response.output_tokens
             )
@@ -343,6 +386,9 @@ class Executor:
                 ):
                     await asyncio.sleep(action_status.wait_seconds)
 
+                if self._kill_triggered():
+                    return self._finalize_aborted_by_kill(metadata)
+
                 tool_result = dispatch_tool_call(
                     parsed,
                     self._input_adapter,
@@ -391,6 +437,96 @@ class Executor:
                 )
                 continue
 
+    def _kill_triggered(self) -> bool:
+        """True if a kill has been signaled for this run."""
+
+        return self._kill_event is not None and self._kill_event.is_set()
+
+    def _kill_reason_or_default(self) -> str:
+        """Return the kill reason from the switch, falling back to a constant."""
+
+        if self._kill_switch is not None:
+            reason = self._kill_switch.reason(self._run_id)
+            if reason:
+                return reason
+        return KILL_SWITCH_REASON
+
+    async def _run_turn_cancellable(
+        self, system_prompt: str, messages: list[Message]
+    ) -> AgentResponse | None:
+        """Run one turn, racing the LLM call against the kill event.
+
+        Returns the :class:`AgentResponse` on completion, or ``None`` if the
+        kill event fires first. On kill we cancel the turn task so the
+        in-flight ``httpx`` request is aborted at the next await point, which
+        is what gives the 2-second abort guarantee from
+        ``CLAUDE.md`` its teeth.
+        """
+
+        turn_task = asyncio.create_task(
+            self._agent_runtime.run_turn(system_prompt, messages)
+        )
+        if self._kill_event is None:
+            return await turn_task
+        kill_task = asyncio.create_task(self._kill_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                [turn_task, kill_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if turn_task in done:
+                return turn_task.result()
+            turn_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await turn_task
+            return None
+        finally:
+            if not kill_task.done():
+                kill_task.cancel()
+
+    async def _await_decision_or_kill(self) -> ConfirmationDecision:
+        """Await a user decision; race against the kill event.
+
+        On kill, synthesize an abort decision. We also inject the synthetic
+        decision into the queue so the underlying ``await_decision`` task can
+        complete and clean up the pending state.
+        """
+
+        decision_task = asyncio.create_task(
+            self._confirmation_queue.await_decision(
+                self._run_id, self._confirmation_timeout_seconds
+            )
+        )
+        if self._kill_event is None:
+            return await decision_task
+        kill_task = asyncio.create_task(self._kill_event.wait())
+        try:
+            done, _pending = await asyncio.wait(
+                [decision_task, kill_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if decision_task in done:
+                return decision_task.result()
+            reason = self._kill_reason_or_default()
+            self._confirmation_queue.submit_decision(
+                self._run_id,
+                ConfirmationDecision(action="abort", reason=reason),
+            )
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await decision_task
+            return ConfirmationDecision(action="abort", reason=reason)
+        finally:
+            if not kill_task.done():
+                kill_task.cancel()
+
+    def _finalize_aborted_by_kill(self, metadata: RunMetadata) -> RunMetadata:
+        """Finalize the run as ``aborted`` due to a kill-switch signal."""
+
+        reason = self._kill_reason_or_default()
+        return self._finalize_aborted(
+            metadata, ConfirmationDecision(action="abort", reason=reason)
+        )
+
     async def _check_and_wait_rate_limit(self) -> BudgetReason | None:
         """Pre-turn budget check. Returns a reason if hard-tripped, else None.
 
@@ -436,9 +572,7 @@ class Executor:
             status="awaiting_confirmation",
             confirmation_count=self._confirmation_count,
         )
-        decision = await self._confirmation_queue.await_decision(
-            self._run_id, self._confirmation_timeout_seconds
-        )
+        decision = await self._await_decision_or_kill()
         if decision.action == "confirm":
             self._destructive_steps_executed.append(step_number)
             self._append_event(
@@ -491,9 +625,7 @@ class Executor:
             status="awaiting_confirmation",
             confirmation_count=self._confirmation_count,
         )
-        user_decision = await self._confirmation_queue.await_decision(
-            self._run_id, self._confirmation_timeout_seconds
-        )
+        user_decision = await self._await_decision_or_kill()
         if user_decision.action == "abort":
             return _GateAbort(decision=user_decision)
         if step_number:
@@ -721,6 +853,7 @@ class _GateAbort:
 
 __all__ = [
     "AGENT_STUCK_REASON",
+    "KILL_SWITCH_REASON",
     "UNKNOWN_ACTION_ABORT_THRESHOLD",
     "USER_ABORT_REASON",
     "Executor",
