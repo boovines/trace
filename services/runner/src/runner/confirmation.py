@@ -46,6 +46,19 @@ _USER_TIMEOUT_REASON: Final[str] = "user_timeout"
 _KILL_SWITCH_REASON: Final[str] = "kill_switch"
 
 
+def _put_decision_nowait(
+    channel: asyncio.Queue[ConfirmationDecision],
+    decision: ConfirmationDecision,
+) -> None:
+    """Best-effort ``put_nowait`` that swallows ``QueueFull``."""
+    try:
+        channel.put_nowait(decision)
+    except asyncio.QueueFull:
+        _logger.warning(
+            "put_decision dropped: decision already pending on the channel"
+        )
+
+
 class IllegalState(RuntimeError):
     """Raised when the queue is used in a way the state machine forbids.
 
@@ -94,6 +107,7 @@ class ConfirmationQueue:
     def __init__(self) -> None:
         self._pending: dict[str, ConfirmationRequest] = {}
         self._channels: dict[str, asyncio.Queue[ConfirmationDecision]] = {}
+        self._channel_loops: dict[str, asyncio.AbstractEventLoop] = {}
 
     def push_request(
         self,
@@ -124,6 +138,7 @@ class ConfirmationQueue:
         )
         self._pending[run_id] = request
         self._channels[run_id] = asyncio.Queue(maxsize=1)
+        self._channel_loops[run_id] = asyncio.get_event_loop()
         return request
 
     async def await_decision(
@@ -151,6 +166,7 @@ class ConfirmationQueue:
         finally:
             self._pending.pop(run_id, None)
             self._channels.pop(run_id, None)
+            self._channel_loops.pop(run_id, None)
 
     def submit_decision(
         self,
@@ -165,19 +181,41 @@ class ConfirmationQueue:
         aborts, so it is a non-fatal no-op.
         """
         channel = self._channels.get(run_id)
-        if channel is None:
+        loop = self._channel_loops.get(run_id)
+        if channel is None or loop is None:
             _logger.warning(
                 "submit_decision for run_id=%s dropped: no pending request "
                 "(already resolved or timed out?)",
                 run_id,
             )
             return False
+        # The channel was created on the executor's loop (possibly a
+        # background thread). When the caller is on the same loop (most
+        # tests), put synchronously so we can surface ``QueueFull`` as a
+        # ``False`` return. When on a different loop (production: UI HTTP
+        # submit from the request-handler thread), hop loops safely.
         try:
-            channel.put_nowait(decision)
-        except asyncio.QueueFull:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        if current is loop:
+            try:
+                channel.put_nowait(decision)
+            except asyncio.QueueFull:
+                _logger.warning(
+                    "submit_decision for run_id=%s dropped: decision already "
+                    "pending on the channel",
+                    run_id,
+                )
+                return False
+            return True
+        try:
+            loop.call_soon_threadsafe(
+                _put_decision_nowait, channel, decision
+            )
+        except RuntimeError:
             _logger.warning(
-                "submit_decision for run_id=%s dropped: decision already "
-                "pending on the channel",
+                "submit_decision for run_id=%s dropped: channel loop closed",
                 run_id,
             )
             return False

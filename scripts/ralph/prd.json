@@ -611,7 +611,7 @@
         "pytest passes"
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": "The TRACE_ALLOW_LIVE check at the API layer is a defense-in-depth \u2014 the adapter's __init__ also checks it, but rejecting at the API layer gives the user a clearer error message than a 500."
     },
     {

@@ -34,16 +34,40 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 
 _logger = logging.getLogger(__name__)
 
 DEFAULT_KILL_REASON: Final[str] = "kill_switch"
 
 
+def _dispatch_on(loop: asyncio.AbstractEventLoop, fn: Any) -> None:
+    """Invoke ``fn`` on ``loop``, synchronously when already on that loop.
+
+    Used to cross from the API's HTTP handler loop (a per-request loop under
+    the sync :class:`TestClient`) to the Executor's run-task loop (the
+    :class:`RunManager`'s background thread) without losing the synchronous
+    contract that callers on the same loop rely on — e.g. tests that call
+    ``kill()`` and then immediately ``event.is_set()``.
+    """
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        current = None
+    if current is loop:
+        fn()
+        return
+    try:
+        loop.call_soon_threadsafe(fn)
+    except RuntimeError:
+        # Target loop closed — nothing to deliver to.
+        return
+
+
 @dataclass
 class _RunState:
     event: asyncio.Event
+    loop: asyncio.AbstractEventLoop
     reason: str | None = None
     killed: bool = False
 
@@ -70,7 +94,10 @@ class KillSwitch:
         """
         state = self._runs.get(run_id)
         if state is None:
-            state = _RunState(event=asyncio.Event())
+            state = _RunState(
+                event=asyncio.Event(),
+                loop=asyncio.get_event_loop(),
+            )
             self._runs[run_id] = state
         return state.event
 
@@ -104,7 +131,7 @@ class KillSwitch:
             return False
         state.killed = True
         state.reason = reason
-        state.event.set()
+        _dispatch_on(state.loop, state.event.set)
         return True
 
     def is_killed(self, run_id: str) -> bool:
