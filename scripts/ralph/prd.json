@@ -735,7 +735,7 @@
         "pytest passes"
       ],
       "priority": 24,
-      "passes": false,
+      "passes": true,
       "notes": "This is the autonomous-phase handoff. After Ralph flips all X-001..X-024 to passes:true and emits RUNNER_DRY_RUN_DONE, a human picks up with X-025."
     },
     {
