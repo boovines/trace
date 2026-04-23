@@ -338,7 +338,7 @@
         "pytest passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "The fake-mode canned scripts are the test oracle for the entire execution loop. They must be realistic — include screenshots in the tool_result content blocks, include realistic step-by-step tool_use blocks, and include confirmation requests (via <needs_confirmation> tags in the text blocks). These canned scripts are where the Ralph loop really gets tested."
     },
     {
