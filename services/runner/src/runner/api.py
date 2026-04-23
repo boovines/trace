@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from runner.confirmation import ConfirmationDecision
 from runner.kill_switch import KillSwitch, get_global_kill_switch
 from runner.run_manager import (
+    DailyCapExceeded,
     InvalidRunState,
     LiveModeNotEnabled,
     RunManager,
@@ -112,6 +113,8 @@ async def start_run(
         )
     except LiveModeNotEnabled as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except DailyCapExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except RunNotFound as exc:
         raise HTTPException(
             status_code=404, detail=f"skill not found: {body.skill_slug}"

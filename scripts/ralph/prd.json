@@ -712,7 +712,7 @@
         "pytest passes"
       ],
       "priority": 23,
-      "passes": false,
+      "passes": true,
       "notes": "The runner's budget is tighter than the synthesizer's because runs happen more often (synthesis is ~once per skill; runs happen every time the skill is used)."
     },
     {

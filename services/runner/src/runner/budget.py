@@ -44,6 +44,7 @@ DEFAULT_MAX_OUTPUT_TOKENS: Final[int] = 50_000
 DEFAULT_MAX_WALL_CLOCK_SECONDS: Final[float] = 600.0
 DEFAULT_MAX_ACTIONS_PER_MINUTE: Final[int] = 30
 DEFAULT_MAX_TOTAL_ACTIONS: Final[int] = 100
+DEFAULT_MAX_COST_USD: Final[float | None] = None
 
 RATE_LIMIT_WINDOW_SECONDS: Final[float] = 60.0
 
@@ -63,6 +64,7 @@ class BudgetReason(StrEnum):
     OUTPUT_TOKENS = "output_tokens"
     WALL_CLOCK = "wall_clock"
     ACTIONS = "actions"
+    COST = "cost"
 
 
 @dataclass(frozen=True)
@@ -110,6 +112,7 @@ class RunBudget:
     max_wall_clock_seconds: float = DEFAULT_MAX_WALL_CLOCK_SECONDS
     max_actions_per_minute: int = DEFAULT_MAX_ACTIONS_PER_MINUTE
     max_total_actions: int = DEFAULT_MAX_TOTAL_ACTIONS
+    max_cost_usd: float | None = DEFAULT_MAX_COST_USD
 
     def __post_init__(self) -> None:
         for name in (
@@ -129,6 +132,18 @@ class RunBudget:
                 "RunBudget.max_wall_clock_seconds must be a positive number, "
                 f"got {wall!r}"
             )
+        cost = self.max_cost_usd
+        if cost is not None:
+            if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+                raise ValueError(
+                    "RunBudget.max_cost_usd must be a positive number or None, "
+                    f"got {cost!r}"
+                )
+            if cost <= 0:
+                raise ValueError(
+                    "RunBudget.max_cost_usd must be > 0 when set, "
+                    f"got {cost!r}"
+                )
 
     @classmethod
     def from_skill_meta(cls, meta: dict[str, Any]) -> RunBudget:
@@ -151,6 +166,7 @@ class RunBudget:
             "max_wall_clock_seconds",
             "max_actions_per_minute",
             "max_total_actions",
+            "max_cost_usd",
         }
         unknown = set(overrides) - known
         if unknown:
@@ -175,6 +191,7 @@ class BudgetTracker:
     input_tokens_used: int = field(init=False, default=0)
     output_tokens_used: int = field(init=False, default=0)
     total_actions: int = field(init=False, default=0)
+    cost_usd_used: float = field(init=False, default=0.0)
     _start_monotonic: float = field(init=False)
     _action_timestamps: deque[float] = field(init=False, default_factory=deque)
 
@@ -191,6 +208,21 @@ class BudgetTracker:
             raise ValueError("token counts must be non-negative")
         self.input_tokens_used += input_tokens
         self.output_tokens_used += output_tokens
+
+    def record_cost(self, cost_usd: float) -> None:
+        """Accumulate dollar cost from a completed agent turn.
+
+        Called by the executor after each turn with the estimate returned
+        by :func:`runner.claude_runtime.estimate_cost_usd`. Non-finite or
+        negative values are rejected so a buggy pricing table cannot
+        silently trip the cap.
+        """
+
+        if isinstance(cost_usd, bool) or not isinstance(cost_usd, (int, float)):
+            raise TypeError("cost_usd must be a non-bool number")
+        if cost_usd < 0:
+            raise ValueError("cost_usd must be non-negative")
+        self.cost_usd_used += float(cost_usd)
 
     def record_action(self) -> None:
         """Register that the harness dispatched one tool action.
@@ -225,6 +257,11 @@ class BudgetTracker:
             return BudgetStatus.budget_exceeded(BudgetReason.WALL_CLOCK)
         if self.total_actions >= self.budget.max_total_actions:
             return BudgetStatus.budget_exceeded(BudgetReason.ACTIONS)
+        if (
+            self.budget.max_cost_usd is not None
+            and self.cost_usd_used >= self.budget.max_cost_usd
+        ):
+            return BudgetStatus.budget_exceeded(BudgetReason.COST)
 
         wait = self._rate_limit_wait()
         if wait is not None:
@@ -255,6 +292,7 @@ class BudgetTracker:
 
 __all__ = [
     "DEFAULT_MAX_ACTIONS_PER_MINUTE",
+    "DEFAULT_MAX_COST_USD",
     "DEFAULT_MAX_INPUT_TOKENS",
     "DEFAULT_MAX_OUTPUT_TOKENS",
     "DEFAULT_MAX_TOTAL_ACTIONS",

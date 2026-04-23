@@ -33,6 +33,12 @@ from typing import Any
 
 from runner import paths
 from runner.budget import BudgetTracker, RunBudget
+from runner.budget_config import (
+    RunnerBudgetConfig,
+    crossed_warning_threshold,
+    load_runner_budget,
+    sum_daily_runner_cost_usd,
+)
 from runner.claude_runtime import ClaudeRuntime
 from runner.confirmation import (
     ConfirmationDecision,
@@ -98,6 +104,22 @@ class _BackgroundLoop:
             return
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=2.0)
+
+
+class DailyCapExceeded(RuntimeError):
+    """Raised when the daily runner cost cap blocks a new run start.
+
+    The API layer maps this to HTTP 429 so the UI can surface the hit cap
+    without crashing. The message names the cap and today's spend.
+    """
+
+    def __init__(self, *, today_spend_usd: float, cap_usd: float) -> None:
+        super().__init__(
+            f"daily runner cost cap reached: ${today_spend_usd:.4f} spent "
+            f"today >= ${cap_usd:.2f} cap"
+        )
+        self.today_spend_usd = today_spend_usd
+        self.cap_usd = cap_usd
 
 
 class LiveModeNotEnabled(RuntimeError):
@@ -227,6 +249,7 @@ class RunManager:
         kill_switch: KillSwitch | None = None,
         adapter_factory: AdapterFactory | None = None,
         runtime_factory: Any = None,
+        config_path: Path | None = None,
     ) -> None:
         self._runs_root = runs_root
         self._skills_root = skills_root
@@ -236,12 +259,14 @@ class RunManager:
         self._kill_switch = kill_switch or get_global_kill_switch()
         self._adapter_factory = adapter_factory
         self._runtime_factory = runtime_factory
+        self._config_path = config_path
         self._runs: dict[str, RunHandle] = {}
         self._broadcaster = EventBroadcaster()
         self._background: _BackgroundLoop | None = None
         self._background_lock = threading.Lock()
         self._index: RunIndex | None = None
         self._index_lock = threading.Lock()
+        self._daily_warning_emitted_for: str | None = None
 
     def _get_background(self) -> _BackgroundLoop:
         with self._background_lock:
@@ -355,6 +380,11 @@ class RunManager:
             return self._runtime_factory(run_id)
         return ClaudeRuntime(run_id=run_id, costs_path=self.costs_path)
 
+    def load_budget_config(self) -> RunnerBudgetConfig:
+        """Load runner cost caps for the active profile. Overridable in tests."""
+
+        return load_runner_budget(self._config_path)
+
     async def start_run(
         self,
         *,
@@ -368,12 +398,23 @@ class RunManager:
             RunNotFound: ``skill_slug`` has no corresponding skill directory.
             LiveModeNotEnabled: ``mode='execute'`` while TRACE_ALLOW_LIVE is
                 not set.
+            DailyCapExceeded: today's summed runner cost is at or above the
+                daily USD cap.
         """
         if mode == "execute" and not is_live_mode_allowed():
             raise LiveModeNotEnabled(
                 "mode='execute' rejected: TRACE_ALLOW_LIVE is not set. "
                 "Live runs require the operator to opt in explicitly."
             )
+
+        budget_config = self.load_budget_config()
+        today_spend = sum_daily_runner_cost_usd(self.costs_path)
+        if today_spend >= budget_config.run_daily_usd_cap:
+            raise DailyCapExceeded(
+                today_spend_usd=today_spend,
+                cap_usd=budget_config.run_daily_usd_cap,
+            )
+        self._maybe_log_daily_warning(today_spend, budget_config.run_daily_usd_cap)
 
         loaded = self._load_skill(skill_slug)
         bundle = self._build_adapters(loaded, mode)
@@ -388,9 +429,26 @@ class RunManager:
             run_index=self._get_index(),
         )
         queue = _BroadcastingConfirmationQueue(self._broadcaster)
-        budget = RunBudget.from_skill_meta(loaded.meta)
+        skill_budget = RunBudget.from_skill_meta(loaded.meta)
+        budget = _merge_cost_cap(
+            skill_budget, budget_config.run_per_execution_usd_cap
+        )
         tracker = BudgetTracker(budget=budget)
         runtime = self._build_runtime(run_id)
+
+        broadcaster = self._broadcaster
+
+        def _publish_per_run_warning(cost_usd: float, cap_usd: float) -> None:
+            broadcaster.publish(
+                run_id,
+                {
+                    "type": "warning",
+                    "run_id": run_id,
+                    "kind": "per_run_cost_80pct",
+                    "cost_usd": cost_usd,
+                    "cap_usd": cap_usd,
+                },
+            )
 
         executor = Executor(
             loaded_skill=loaded,
@@ -405,6 +463,7 @@ class RunManager:
             confirmation_queue=queue,
             run_id=run_id,
             kill_switch=self._kill_switch,
+            cost_warning_sink=_publish_per_run_warning,
         )
 
         async def _run_and_finalize() -> RunMetadata:
@@ -535,6 +594,26 @@ class RunManager:
             if line.strip()
         ]
 
+    def _maybe_log_daily_warning(self, today_spend: float, cap_usd: float) -> None:
+        """Log a stderr warning the first time today's spend crosses 80% of cap.
+
+        Keyed by ``YYYY-MM-DD`` so a fresh UTC day re-arms the warning.
+        """
+        import datetime as _dt
+
+        today = _dt.datetime.now(_dt.UTC).date().isoformat()
+        if self._daily_warning_emitted_for == today:
+            return
+        if not crossed_warning_threshold(0.0, today_spend, cap_usd):
+            return
+        self._daily_warning_emitted_for = today
+        logger.warning(
+            "runner daily cost $%.4f exceeded 80%% of $%.2f cap (profile %s)",
+            today_spend,
+            cap_usd,
+            today,
+        )
+
     def screenshot_path(self, run_id: str, filename: str) -> Path:
         """Return the filesystem path for a run's screenshot.
 
@@ -552,8 +631,24 @@ class RunManager:
         return candidate
 
 
+def _merge_cost_cap(base: RunBudget, cost_cap_usd: float) -> RunBudget:
+    """Return a copy of ``base`` with ``max_cost_usd`` set to the smaller value.
+
+    If the skill already requested a cost cap via ``runtime_limits``, the
+    minimum of the two wins — neither layer should be able to loosen the
+    other. ``dataclasses.replace`` re-runs ``__post_init__`` so the copy is
+    still validated.
+    """
+    from dataclasses import replace
+
+    existing = base.max_cost_usd
+    effective = cost_cap_usd if existing is None else min(existing, cost_cap_usd)
+    return replace(base, max_cost_usd=effective)
+
+
 __all__ = [
     "AdapterBundle",
+    "DailyCapExceeded",
     "InvalidRunState",
     "LiveModeNotEnabled",
     "RunHandle",

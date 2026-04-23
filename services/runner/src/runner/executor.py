@@ -60,6 +60,7 @@ import asyncio
 import base64
 import contextlib
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Final, cast
 from uuid import UUID
@@ -70,6 +71,7 @@ from runner.budget import (
     BudgetStatusKind,
     BudgetTracker,
 )
+from runner.budget_config import crossed_warning_threshold
 from runner.claude_runtime import estimate_cost_usd
 from runner.confirmation import (
     DEFAULT_CONFIRMATION_TIMEOUT_SECONDS,
@@ -107,7 +109,10 @@ UNKNOWN_ACTION_ABORT_THRESHOLD: Final[int] = 4
 AGENT_STUCK_REASON: Final[str] = "agent_stuck"
 USER_ABORT_REASON: Final[str] = "user_abort"
 KILL_SWITCH_REASON: Final[str] = "kill_switch"
+PER_RUN_COST_CAP_REASON: Final[str] = "per_run_cost_cap"
 DEFAULT_TARGET_LONGEST_EDGE: Final[int] = 1568
+
+CostWarningSink = Callable[[float, float], None]
 
 
 def _default_image_mapping() -> ImageMapping:
@@ -178,6 +183,7 @@ class Executor:
         run_id: str,
         confirmation_timeout_seconds: float = DEFAULT_CONFIRMATION_TIMEOUT_SECONDS,
         kill_switch: KillSwitch | None = None,
+        cost_warning_sink: CostWarningSink | None = None,
     ) -> None:
         self._loaded_skill = loaded_skill
         self._parameters = dict(parameters)
@@ -193,6 +199,8 @@ class Executor:
         self._confirmation_timeout_seconds = confirmation_timeout_seconds
         self._kill_switch = kill_switch
         self._kill_event: asyncio.Event | None = None
+        self._cost_warning_sink = cost_warning_sink
+        self._cost_warning_emitted = False
 
         self._event_seq = 0
         self._screenshot_seq = 0
@@ -319,11 +327,15 @@ class Executor:
             self._budget.record_turn(
                 response.input_tokens, response.output_tokens
             )
-            self._input_tokens_total += response.input_tokens
-            self._output_tokens_total += response.output_tokens
-            self._cost_usd_total += estimate_cost_usd(
+            turn_cost = estimate_cost_usd(
                 response.input_tokens, response.output_tokens
             )
+            self._input_tokens_total += response.input_tokens
+            self._output_tokens_total += response.output_tokens
+            prev_cost = self._cost_usd_total
+            self._cost_usd_total += turn_cost
+            self._budget.record_cost(turn_cost)
+            self._maybe_emit_cost_warning(prev_cost, self._cost_usd_total)
             self._writer.append_transcript(
                 turn=response.turn_number,
                 role="assistant",
@@ -777,10 +789,38 @@ class Executor:
             final_step_reached=self._max_step_seen or None,
         )
 
+    def _maybe_emit_cost_warning(self, prev_cost: float, new_cost: float) -> None:
+        """Emit an 80%-of-cap warning once, on the first crossing."""
+
+        if self._cost_warning_emitted:
+            return
+        cap = self._budget.budget.max_cost_usd
+        if cap is None:
+            return
+        if not crossed_warning_threshold(prev_cost, new_cost, cap):
+            return
+        self._cost_warning_emitted = True
+        logger.warning(
+            "runner cost for run %s at $%.4f exceeded 80%% of $%.2f cap",
+            self._run_id,
+            new_cost,
+            cap,
+        )
+        if self._cost_warning_sink is not None:
+            try:
+                self._cost_warning_sink(new_cost, cap)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("cost warning sink raised")
+
     def _finalize_budget_exceeded(
         self, metadata: RunMetadata, reason: BudgetReason | None
     ) -> RunMetadata:
-        abort_reason = f"budget_exceeded:{reason}" if reason is not None else "budget_exceeded"
+        if reason == BudgetReason.COST:
+            abort_reason = PER_RUN_COST_CAP_REASON
+        elif reason is not None:
+            abort_reason = f"budget_exceeded:{reason}"
+        else:
+            abort_reason = "budget_exceeded"
         self._append_event(
             "error",
             f"budget_exceeded reason={reason}",
@@ -854,7 +894,9 @@ class _GateAbort:
 __all__ = [
     "AGENT_STUCK_REASON",
     "KILL_SWITCH_REASON",
+    "PER_RUN_COST_CAP_REASON",
     "UNKNOWN_ACTION_ABORT_THRESHOLD",
     "USER_ABORT_REASON",
+    "CostWarningSink",
     "Executor",
 ]
