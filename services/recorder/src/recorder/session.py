@@ -52,6 +52,7 @@ from recorder.focus_tracker import (
     FocusTracker,
     WindowFocusPayload,
 )
+from recorder.index_db import IndexDB
 from recorder.keyframe_policy import KeyframePolicy
 from recorder.permissions import (
     PermissionsError,
@@ -200,6 +201,7 @@ class RecordingSession:
         self,
         root: Path | str,
         *,
+        index_db: IndexDB | None = None,
         event_tap_factory: EventTapFactory | None = None,
         focus_tracker_factory: FocusTrackerFactory | None = None,
         text_aggregator_factory: TextAggregatorFactory | None = None,
@@ -210,6 +212,7 @@ class RecordingSession:
         keyframe_policy: KeyframePolicy | None = None,
     ) -> None:
         self.root: Path = Path(root)
+        self._index_db: IndexDB | None = index_db
 
         self._event_tap_factory: EventTapFactory = (
             event_tap_factory if event_tap_factory is not None else EventTap
@@ -297,7 +300,7 @@ class RecordingSession:
 
             display_info = self._display_info_provider() or _FALLBACK_DISPLAY_INFO
 
-            writer = TrajectoryWriter(self.root, label)
+            writer = TrajectoryWriter(self.root, label, index_db=self._index_db)
             try:
                 metadata: dict[str, Any] = {
                     "id": writer.id,

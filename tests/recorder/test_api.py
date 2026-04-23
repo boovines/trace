@@ -34,6 +34,7 @@ from recorder.api import (
 from recorder.api import (
     router as recorder_router,
 )
+from recorder.index_db import IndexDB
 from recorder.permissions import PermissionsError
 from recorder.session import (
     PermissionsMissingError,
@@ -58,8 +59,9 @@ class FakeSession:
 
     permissions_error: PermissionsError | None = None
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, index_db: IndexDB | None = None) -> None:
         self.root = root
+        self.index_db = index_db
         self.label: str = ""
         self._writer: TrajectoryWriter | None = None
         self._active: bool = False
@@ -71,7 +73,7 @@ class FakeSession:
             raise PermissionsMissingError(FakeSession.permissions_error)
         if self._active:
             raise SessionAlreadyActiveError("already active")
-        writer = TrajectoryWriter(self.root, label)
+        writer = TrajectoryWriter(self.root, label, index_db=self.index_db)
         writer.write_metadata(
             {
                 "id": writer.id,
@@ -136,6 +138,17 @@ class FakeSession:
             encoding="utf-8",
         )
         duration_ms = int((time.monotonic() - self._started_monotonic) * 1000)
+        # Overwrite the index row with the deterministic values from the
+        # hand-written metadata so list_trajectories assertions are stable.
+        if self.index_db is not None:
+            self.index_db.upsert(
+                trajectory_id=self._writer.id,
+                label=self.label or None,
+                started_at="2026-04-23T12:00:00.000+00:00",
+                stopped_at="2026-04-23T12:00:01.500+00:00",
+                event_count=2,
+                duration_ms=1500,
+            )
         summary: SessionSummary = {
             "trajectory_id": self._writer.id,
             "event_count": 2,

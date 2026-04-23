@@ -42,6 +42,10 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **HTTP path traversal testing**: `httpx.AsyncClient` normalises `..`/`.`/empty path segments BEFORE the request reaches the ASGI app, so HTTP-level traversal tests are unreliable. Unit-test the path-safety helper (e.g. `_safe_screenshot_path`) directly with raw filename strings instead of through the HTTP layer.
 - **Storage root resolution**: `recorder.storage.default_trajectories_root()` resolves prod (`Trace`) vs dev (`Trace-dev`) profile via `TRACE_DEV_MODE=1`. Tests pin a `tmp_path` via `TRACE_PROFILE_DIR`. Any new module that needs to write to the per-user app data directory should reuse this helper rather than computing its own paths.
 - **PermissionsError forwarding**: `PermissionsMissingError.error` is the structured `PermissionsError` TypedDict — return it verbatim as the 403 body via `JSONResponse(status_code=403, content=dict(exc.error))`. Synthesizer/Runner endpoints that need similar structured-error responses should follow the same shape rather than re-inventing.
+- **IndexDB is a cache, not a source of truth**: `recorder.index_db.IndexDB` mirrors per-trajectory summary fields in SQLite for fast `GET /trajectories`. The filesystem (`metadata.json` + `events.jsonl`) remains authoritative; `IndexDB.reconcile(root)` rebuilds the cache from disk and is invoked automatically in `RecorderState.__init__` so a service restart heals drift without manual intervention. Writer failures against the index are silently suppressed via `contextlib.suppress(Exception)` — a cache outage must not break a live recording.
+- **SessionFactory signature includes IndexDB**: `recorder.api.SessionFactory = Callable[[Path, IndexDB | None], RecordingSession]`. Any test that substitutes `session_factory=FakeSession` must have `FakeSession.__init__(self, root, index_db=None)`, and should forward the index_db to its `TrajectoryWriter` so `list_trajectories` assertions see the rows. Changing the factory again later is a breaking change across every test suite that mocks a session — think twice.
+- **Where the index lives**: `<app_support>/index.db` (i.e., `default_trajectories_root().parent / "index.db"`), NOT inside the `trajectories/` directory.  `recorder.storage.default_index_db_path()` is the canonical resolver — reuse rather than hardcoding. Tests pin via the same `TRACE_PROFILE_DIR` override that controls `default_trajectories_root`.
+- **duration_ms tests must tolerate sign**: `TrajectoryWriter.close()` rewrites `stopped_at` to `now()`, so a hermetic test whose `started_at` is a fixed future date will produce a negative `duration_ms`. Either assert on presence-not-sign (`is not None`), OR overwrite the index row post-close with deterministic values (that's what `FakeSession.stop()` in `test_api.py` does — then `list_trajectories` can assert `duration_ms == 1500`).
 
 ---
 
@@ -371,4 +375,35 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - The session-already-active check is at the `RecorderState` layer (with the lock), not at the router. The router's only job is to translate `SessionAlreadyActiveError`/`SessionNotActiveError`/`PermissionsMissingError` into 409/409/403 — keep this split when adding new endpoints (e.g. /recorder/abort), so the lock guarantees aren't bypassable from a different route.
   - `PermissionsMissingError.error` is a plain dict (`PermissionsError` TypedDict) and is returned directly as the 403 body via `JSONResponse(status_code=403, content=dict(exc.error))`. Future modules (Synthesizer, Runner) that need similar structured-error responses should follow the same shape rather than re-inventing.
   - Static screenshot serving uses `FileResponse` (per-request) instead of `StaticFiles` mount. This avoids requiring the trajectories directory to exist at app startup AND lets us enforce the path-safety check (`_safe_screenshot_path`) per request. If the asset volume ever justifies switching to `StaticFiles`, keep the safety check by mounting the dir at a different path and proxying through the safe handler.
+---
+
+## 2026-04-23 - R-012
+- Added `services/recorder/src/recorder/index_db.py` exposing `IndexDB` (SQLite, `check_same_thread=False` + `threading.Lock`) with `upsert`/`mark_closed`/`delete`/`get`/`list_all`/`ids`/`reconcile`/`close` and context-manager semantics. Schema matches R-012 AC: `trajectories(id PK, label, started_at, stopped_at, event_count NOT NULL DEFAULT 0, duration_ms)`. Uses `INSERT … ON CONFLICT(id) DO UPDATE` for upsert to keep it one SQL statement.
+- `reconcile(trajectories_root)` scans the root for directories with readable `metadata.json`, upserts a row derived from metadata + a line count of `events.jsonl`, and deletes any indexed id whose directory is missing. Returns `{added_or_updated, removed}` for logging.
+- `recorder.writer.TrajectoryWriter` now accepts an optional `index_db=` kwarg. Inserts a minimal row on construction (id + label), upserts on `write_metadata` (fills in started_at/stopped_at/duration_ms), and `mark_closed`-then-fallback-upserts on `close()`. All index writes are wrapped in `contextlib.suppress(Exception)` because the index is a cache, not authoritative — a cache blip must not break a live recording.
+- `recorder.session.RecordingSession` takes an `index_db=` kwarg and forwards it to the `TrajectoryWriter` it creates.
+- `recorder.api.RecorderState` now owns an `IndexDB` — auto-creates one at `<root>.parent/index.db` if none is passed, and calls `index_db.reconcile(root)` once on `__init__` so service startup heals any drift (AC #7).
+- `SessionFactory` signature changed to `Callable[[Path, IndexDB | None], RecordingSession]` so the state can inject its index into the session at start time. `_default_session_factory(root, index_db)` constructs `RecordingSession(root, index_db=index_db)`.
+- `GET /trajectories` reads from `state.index_db.list_all()` (AC #5). Removed dead helpers `_count_events`, `_duration_ms`, `_build_summary` from `api.py` — they were only used by the old filesystem-scan implementation.
+- `DELETE /trajectories/{id}` now also removes the index row; returns 404 iff neither the directory nor the row existed.
+- Added `recorder.storage.default_index_db_path()` returning `<profile>/index.db`. `get_recorder_state()` wires it through when constructing the default singleton.
+- Updated `tests/recorder/test_api.py::FakeSession` to accept and forward `index_db` (matches the new factory signature) and to upsert deterministic close-time values into the index so `list_trajectories` duration assertions stay stable.
+- Added `tests/recorder/test_index_db.py` (20 tests): file/parent creation, reopen persistence, upsert/get/replace, mark_closed happy+miss, delete (incl. double-delete), list ordering (by started_at with NULLs first), reconcile (add, remove-stale, ignore-non-trajectory-dirs, ignore-corrupt-metadata, missing root, event count refresh), TrajectoryWriter integration (insert on creation, update on close, no-op when index absent), concurrent upsert across 4 threads, and `default_index_db_path` follows TRACE_PROFILE_DIR.
+- Files changed:
+  - `services/recorder/src/recorder/index_db.py` (new)
+  - `services/recorder/src/recorder/writer.py`
+  - `services/recorder/src/recorder/session.py`
+  - `services/recorder/src/recorder/api.py`
+  - `services/recorder/src/recorder/storage.py`
+  - `tests/recorder/test_api.py` (FakeSession signature + index_db upsert in stop)
+  - `tests/recorder/test_index_db.py` (new)
+  - `scripts/ralph/prd.json` (R-012 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (261 tests, 4 skipped macOS-only).
+- **Learnings for future iterations:**
+  - `sqlite3.connect(..., check_same_thread=False)` + a `threading.Lock` is enough for the recorder's access pattern (one writer thread, one HTTP reader). Do NOT reach for an ORM — the whole module is ~200 lines and a single `CREATE TABLE IF NOT EXISTS` migration.
+  - `INSERT … ON CONFLICT(id) DO UPDATE SET` is cleaner than `INSERT OR REPLACE` when you want the new row's non-key fields to take precedence and the existing row's other fields to stay untouched. Prefer it over the SQLite-specific `REPLACE` semantics.
+  - `ORDER BY started_at IS NULL DESC, started_at ASC, id ASC` puts in-progress rows (NULL started_at) at the top of the list — useful because those are the ones the user cares about most.
+  - When converting `try/except/pass` to `contextlib.suppress(Exception)`, ruff `SIM105` flags the former AND `RUF100` flags any `# noqa: BLE001` that was there because `BLE001` is not enabled in this repo's ruff config. Don't add `# noqa: BLE001` pre-emptively.
+  - `mypy --strict` is happy with the `SessionFactory = Callable[[Path, IndexDB | None], RecordingSession]` signature only if `IndexDB` is imported at module top level in `api.py` (not in `TYPE_CHECKING` — Callable definitions at module scope are evaluated at import time).
+  - Recording tests where `started_at` is a fixed future date (e.g., "2026-04-23T12:00:00.000+00:00") will produce a NEGATIVE `duration_ms` through `TrajectoryWriter.close()` because close writes `stopped_at = now()`. Assert presence, not sign — or overwrite the index row post-close with deterministic values.
 ---

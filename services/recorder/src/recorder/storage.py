@@ -20,8 +20,10 @@ from pathlib import Path
 __all__ = [
     "DEV_PROFILE",
     "PROD_PROFILE",
+    "default_index_db_path",
     "default_trajectories_root",
     "ensure_trajectories_root",
+    "remove_trajectory",
     "trajectory_dir",
 ]
 
@@ -46,6 +48,15 @@ def default_trajectories_root() -> Path:
         return Path(override) / "trajectories"
     profile = DEV_PROFILE if os.environ.get("TRACE_DEV_MODE") == "1" else PROD_PROFILE
     return Path.home() / "Library" / "Application Support" / profile / "trajectories"
+
+
+def default_index_db_path() -> Path:
+    """Return the default path for ``index.db`` alongside the trajectories root.
+
+    Lives at ``<profile>/index.db`` so the SQLite file is in the same
+    perms-0700 profile directory as the trajectory data itself.
+    """
+    return default_trajectories_root().parent / "index.db"
 
 
 def ensure_trajectories_root(root: Path) -> Path:

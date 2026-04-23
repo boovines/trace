@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
+from recorder.index_db import IndexDB
 from recorder.session import (
     PermissionsMissingError,
     RecordingSession,
@@ -40,6 +41,7 @@ from recorder.session import (
     SessionSummary,
 )
 from recorder.storage import (
+    default_index_db_path,
     default_trajectories_root,
     ensure_trajectories_root,
     remove_trajectory,
@@ -56,7 +58,7 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-SessionFactory = Callable[[Path], RecordingSession]
+SessionFactory = Callable[[Path, "IndexDB | None"], RecordingSession]
 
 
 class StartRequest(BaseModel):
@@ -105,8 +107,10 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
-def _default_session_factory(root: Path) -> RecordingSession:
-    return RecordingSession(root)
+def _default_session_factory(
+    root: Path, index_db: IndexDB | None
+) -> RecordingSession:
+    return RecordingSession(root, index_db=index_db)
 
 
 class RecorderState:
@@ -123,6 +127,9 @@ class RecorderState:
         root: Path,
         *,
         session_factory: SessionFactory | None = None,
+        index_db: IndexDB | None = None,
+        index_db_path: Path | None = None,
+        reconcile_on_init: bool = True,
     ) -> None:
         self.root: Path = Path(root)
         self._session_factory: SessionFactory = (
@@ -133,6 +140,18 @@ class RecorderState:
         self._started_at: str | None = None
         ensure_trajectories_root(self.root)
 
+        if index_db is not None:
+            self.index_db: IndexDB = index_db
+        else:
+            db_path = index_db_path if index_db_path is not None else self.root.parent / "index.db"
+            self.index_db = IndexDB(db_path)
+
+        if reconcile_on_init:
+            try:
+                self.index_db.reconcile(self.root)
+            except Exception:
+                logger.exception("IndexDB.reconcile on startup failed")
+
     # ------------------------------------------------------------- lifecycle
 
     def start(self, label: str | None) -> str:
@@ -142,7 +161,7 @@ class RecorderState:
                 raise SessionAlreadyActiveError(
                     "A recording session is already in progress."
                 )
-            session = self._session_factory(self.root)
+            session = self._session_factory(self.root, self.index_db)
             tid = session.start(label or "")
             self._session = session
             self._started_at = _utc_now_iso()
@@ -204,7 +223,10 @@ def get_recorder_state() -> RecorderState:
     """
     global _STATE
     if _STATE is None:
-        _STATE = RecorderState(default_trajectories_root())
+        _STATE = RecorderState(
+            default_trajectories_root(),
+            index_db_path=default_index_db_path(),
+        )
     return _STATE
 
 
@@ -233,17 +255,6 @@ def _read_metadata(traj_dir: Path) -> dict[str, Any] | None:
     return data
 
 
-def _count_events(traj_dir: Path) -> int:
-    events_path = traj_dir / "events.jsonl"
-    if not events_path.is_file():
-        return 0
-    try:
-        with events_path.open(encoding="utf-8") as fh:
-            return sum(1 for line in fh if line.strip())
-    except OSError:
-        return 0
-
-
 def _read_events(traj_dir: Path) -> list[dict[str, Any]]:
     events_path = traj_dir / "events.jsonl"
     if not events_path.is_file():
@@ -270,37 +281,6 @@ def _list_screenshots(traj_dir: Path) -> list[str]:
         return []
     names = sorted(p.name for p in screenshots_dir.iterdir() if p.is_file())
     return [f"screenshots/{name}" for name in names]
-
-
-def _duration_ms(metadata: dict[str, Any]) -> int | None:
-    started = metadata.get("started_at")
-    stopped = metadata.get("stopped_at")
-    if not isinstance(started, str) or not isinstance(stopped, str):
-        return None
-    try:
-        start_dt = datetime.fromisoformat(started)
-        stop_dt = datetime.fromisoformat(stopped)
-    except ValueError:
-        return None
-    return int((stop_dt - start_dt).total_seconds() * 1000)
-
-
-def _build_summary(traj_dir: Path, metadata: dict[str, Any]) -> TrajectorySummary | None:
-    tid = metadata.get("id")
-    if not isinstance(tid, str):
-        return None
-    return TrajectorySummary(
-        id=tid,
-        label=metadata.get("label") if isinstance(metadata.get("label"), str) else None,
-        started_at=metadata.get("started_at")
-        if isinstance(metadata.get("started_at"), str)
-        else None,
-        stopped_at=metadata.get("stopped_at")
-        if isinstance(metadata.get("stopped_at"), str)
-        else None,
-        duration_ms=_duration_ms(metadata),
-        event_count=_count_events(traj_dir),
-    )
 
 
 def _safe_screenshot_path(root: Path, trajectory_id: str, filename: str) -> Path | None:
@@ -381,20 +361,18 @@ def get_status(
 def list_trajectories(
     state: RecorderState = StateDep,
 ) -> list[TrajectorySummary]:
-    root = state.root
-    if not root.is_dir():
-        return []
-    summaries: list[TrajectorySummary] = []
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
-            continue
-        metadata = _read_metadata(entry)
-        if metadata is None:
-            continue
-        summary = _build_summary(entry, metadata)
-        if summary is not None:
-            summaries.append(summary)
-    return summaries
+    rows = state.index_db.list_all()
+    return [
+        TrajectorySummary(
+            id=row["id"],
+            label=row["label"],
+            started_at=row["started_at"],
+            stopped_at=row["stopped_at"],
+            duration_ms=row["duration_ms"],
+            event_count=row["event_count"],
+        )
+        for row in rows
+    ]
 
 
 @trajectories_router.get(
@@ -442,7 +420,9 @@ def delete_trajectory(
             status_code=409,
             detail="trajectory is the active recording; stop it first",
         )
-    if not remove_trajectory(state.root, trajectory_id):
+    removed_dir = remove_trajectory(state.root, trajectory_id)
+    removed_row = state.index_db.delete(trajectory_id)
+    if not removed_dir and not removed_row:
         raise HTTPException(status_code=404, detail=f"trajectory {trajectory_id} not found")
     return _DeleteResponse(deleted=trajectory_id)
 

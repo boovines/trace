@@ -26,6 +26,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, TextIO
 
+from recorder.index_db import IndexDB
 from recorder.schema import validate_event, validate_metadata
 
 __all__ = ["TrajectoryWriter"]
@@ -33,6 +34,19 @@ __all__ = ["TrajectoryWriter"]
 
 def _utcnow_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+def _duration_ms_from_metadata(metadata: dict[str, Any]) -> int | None:
+    started = metadata.get("started_at")
+    stopped = metadata.get("stopped_at")
+    if not isinstance(started, str) or not isinstance(stopped, str):
+        return None
+    try:
+        start_dt = datetime.fromisoformat(started)
+        stop_dt = datetime.fromisoformat(stopped)
+    except ValueError:
+        return None
+    return int((stop_dt - start_dt).total_seconds() * 1000)
 
 
 class TrajectoryWriter:
@@ -48,6 +62,7 @@ class TrajectoryWriter:
         label: str,
         *,
         trajectory_id: str | None = None,
+        index_db: IndexDB | None = None,
     ) -> None:
         self.id: str = trajectory_id or str(uuid_module.uuid4())
         self.label: str = label
@@ -69,6 +84,22 @@ class TrajectoryWriter:
         self._next_seq: int = 1
         self._metadata: dict[str, Any] | None = None
         self._closed: bool = False
+        self._index_db: IndexDB | None = index_db
+
+        # Insert a minimal row now so GET /trajectories sees an in-flight
+        # recording even before write_metadata() lands; started_at + label
+        # will be filled in as soon as the session calls write_metadata().
+        # Index is a cache, not authoritative — swallow failures.
+        if self._index_db is not None:
+            with contextlib.suppress(Exception):
+                self._index_db.upsert(
+                    trajectory_id=self.id,
+                    label=label or None,
+                    started_at=None,
+                    stopped_at=None,
+                    event_count=0,
+                    duration_ms=None,
+                )
 
     # ----------------------------------------------------------------- metadata
 
@@ -79,6 +110,32 @@ class TrajectoryWriter:
         with self._lock:
             self._atomic_write_json(self._metadata_path, snapshot)
             self._metadata = snapshot
+            event_count = max(0, self._next_seq - 1)
+
+        if self._index_db is not None:
+            label = (
+                snapshot.get("label") if isinstance(snapshot.get("label"), str) else None
+            )
+            started_at = (
+                snapshot.get("started_at")
+                if isinstance(snapshot.get("started_at"), str)
+                else None
+            )
+            stopped_at = (
+                snapshot.get("stopped_at")
+                if isinstance(snapshot.get("stopped_at"), str)
+                else None
+            )
+            duration_ms = _duration_ms_from_metadata(snapshot)
+            with contextlib.suppress(Exception):
+                self._index_db.upsert(
+                    trajectory_id=self.id,
+                    label=label,
+                    started_at=started_at,
+                    stopped_at=stopped_at,
+                    event_count=event_count,
+                    duration_ms=duration_ms,
+                )
 
     # ------------------------------------------------------------------- events
 
@@ -164,6 +221,50 @@ class TrajectoryWriter:
                 validate_metadata(metadata)
                 self._atomic_write_json(self._metadata_path, metadata)
                 self._metadata = metadata
+
+            event_count = max(0, self._next_seq - 1)
+
+        if self._index_db is not None:
+            final_meta: dict[str, Any] | None = self._metadata
+            stopped_at = (
+                final_meta.get("stopped_at")
+                if final_meta is not None
+                and isinstance(final_meta.get("stopped_at"), str)
+                else None
+            )
+            duration_ms = (
+                _duration_ms_from_metadata(final_meta)
+                if final_meta is not None
+                else None
+            )
+            with contextlib.suppress(Exception):
+                updated = self._index_db.mark_closed(
+                    self.id,
+                    stopped_at=stopped_at,
+                    event_count=event_count,
+                    duration_ms=duration_ms,
+                )
+                if not updated and final_meta is not None:
+                    # No row yet (write_metadata was never called) — upsert
+                    # a complete row from the metadata we just finalised.
+                    label = (
+                        final_meta.get("label")
+                        if isinstance(final_meta.get("label"), str)
+                        else None
+                    )
+                    started_at = (
+                        final_meta.get("started_at")
+                        if isinstance(final_meta.get("started_at"), str)
+                        else None
+                    )
+                    self._index_db.upsert(
+                        trajectory_id=self.id,
+                        label=label,
+                        started_at=started_at,
+                        stopped_at=stopped_at,
+                        event_count=event_count,
+                        duration_ms=duration_ms,
+                    )
 
     # ---------------------------------------------------------------- internals
 

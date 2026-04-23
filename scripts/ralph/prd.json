@@ -291,7 +291,7 @@
         "pytest passes"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "SQLite is enough for v1 — do not introduce an ORM. Use sqlite3 directly with parameterized queries."
     },
     {
