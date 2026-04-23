@@ -491,7 +491,7 @@
         "Human runs this test before merging feat/synthesizer to main; a passing smoke_report.json is attached to the PR description"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "This is the Synthesizer's analog to the Recorder's smoke test — except here it's a small, cheap real-API test rather than a hardware test. The 4-of-5 threshold on overall similarity tolerates LLM variance; the 5-of-5 on destructive_match does not, because destructive flagging is safety-critical and must be deterministic (the secondary keyword matcher enforces this)."
     },
     {

@@ -195,6 +195,14 @@ If the current branch is `feat/integration`, also run browser verification via t
 
 ---
 
+## Synthesizer module (Module 2)
+
+The synthesizer's pre-merge gate is the real-API smoke test at `tests/synthesizer/test_real_smoke.py`. It runs `generate_draft` against real Claude Sonnet 4.5 for each of the five reference workflows, scores each result against the hand-crafted golden via Claude Haiku 4.5, and asserts `destructive_match == 1.0` on all five and `overall >= 0.80` on at least four. Total spend is capped at $2 per run (PRD `apiCostBudgetForSmoke`).
+
+The smoke test is gated behind `TRACE_REAL_API_TESTS=1` and is **not** part of the Ralph loop — Ralph emits `SYNTHESIZER_DONE` based on fake-mode tests only. A human runs it before merging `feat/synthesizer` to `main` and attaches `tests/synthesizer/smoke_report.json` to the PR description. See `tests/synthesizer/README.md` for the run command and expected costs.
+
+---
+
 ## Ralph loop conventions for this project
 
 - **Completion promise per branch:**
