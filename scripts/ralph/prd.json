@@ -363,7 +363,7 @@
         "pytest passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "The prompt is load-bearing for safety. The literal string '<needs_confirmation step=\"N\"/>' is what the executor parses — if the prompt drifts and the model emits something slightly different, the parser won't match and a destructive action could slip through. The harness-layer keyword matcher (X-015) is the backup for this case."
     },
     {
