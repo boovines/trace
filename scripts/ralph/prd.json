@@ -469,7 +469,7 @@
         "pytest passes"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "These are hand-crafted. Ralph is NOT allowed to regenerate them from trajectories — if it does, the snapshot test becomes tautological. Document this rule in the fixtures README AND call it out in CLAUDE.md."
     },
     {

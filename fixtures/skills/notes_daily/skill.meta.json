@@ -1,0 +1,31 @@
+{
+  "slug": "notes_daily",
+  "name": "Create a daily note in Apple Notes",
+  "trajectory_id": "b1a0f6f2-0005-4c00-8000-000000000005",
+  "created_at": "2026-04-22T18:05:00+00:00",
+  "parameters": [
+    {
+      "name": "note_title",
+      "type": "string",
+      "required": true,
+      "default": "2026-04-22"
+    },
+    {
+      "name": "note_template",
+      "type": "string",
+      "required": true
+    },
+    {
+      "name": "notes_folder",
+      "type": "string",
+      "required": false,
+      "default": "Notes"
+    }
+  ],
+  "destructive_steps": [],
+  "preconditions": [
+    "The Apple Notes app is installed and signed into the target iCloud account.",
+    "The {notes_folder} folder exists in the Notes sidebar."
+  ],
+  "step_count": 4
+}

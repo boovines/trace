@@ -182,11 +182,14 @@ Any Ralph iteration must run and pass these before setting `passes: true` on any
 uv run ruff check services/                   # lint
 uv run mypy --strict services/                # type check
 uv run pytest tests/<current-module>/         # module-specific tests
+./scripts/check_fixtures.sh                   # golden SKILL fixtures (< 5 s)
 
 # Frontend (only on feat/integration branch)
 pnpm --filter app typecheck
 pnpm --filter app test
 ```
+
+The golden skill fixtures under `fixtures/skills/` are **hand-crafted ground truth** for the synthesizer's similarity tests (S-014, S-017). Ralph iterations must NOT regenerate them from a synthesized draft — see `fixtures/skills/README.md`.
 
 If the current branch is `feat/integration`, also run browser verification via the dev-browser skill for any UI story.
 
