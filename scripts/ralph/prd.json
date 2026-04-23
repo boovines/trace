@@ -560,7 +560,7 @@
         "pytest passes"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": "This is the last story on the branch and is the hand-off to future maintenance. Ralph iterations MUST update progress.txt incrementally as they go, not save it all for this story. Per the Ralph docs, AGENTS.md files are auto-read by Claude Code."
     }
   ],
