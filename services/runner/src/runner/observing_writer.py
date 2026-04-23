@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from runner.event_stream import EventBroadcaster
+from runner.run_index import RunIndex
 from runner.run_writer import RunWriter
 from runner.schema import RunMetadata
 
@@ -37,12 +38,14 @@ class ObservingRunWriter(RunWriter):
         mode: str,
         runs_root: Path,
         broadcaster: EventBroadcaster,
+        run_index: RunIndex | None = None,
     ) -> None:
         super().__init__(
             run_id=run_id,
             skill_slug=skill_slug,
             mode=mode,
             runs_root=runs_root,
+            run_index=run_index,
         )
         self._broadcaster = broadcaster
         self._last_published_status: str | None = None

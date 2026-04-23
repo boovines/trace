@@ -46,6 +46,7 @@ from runner.input_adapter import DryRunInputAdapter, InputAdapter
 from runner.kill_switch import KillSwitch, get_global_kill_switch
 from runner.observing_writer import ObservingRunWriter
 from runner.pre_action_gate import AXResolver, AXTarget
+from runner.run_index import RunIndex
 from runner.safety import is_live_mode_allowed
 from runner.schema import RunMetadata, RunMode
 from runner.screen_source import ScreenSource, TrajectoryScreenSource
@@ -222,6 +223,7 @@ class RunManager:
         skills_root: Path | None = None,
         trajectories_root: Path | None = None,
         costs_path: Path | None = None,
+        index_path: Path | None = None,
         kill_switch: KillSwitch | None = None,
         adapter_factory: AdapterFactory | None = None,
         runtime_factory: Any = None,
@@ -230,6 +232,7 @@ class RunManager:
         self._skills_root = skills_root
         self._trajectories_root = trajectories_root
         self._costs_path = costs_path
+        self._index_path = index_path
         self._kill_switch = kill_switch or get_global_kill_switch()
         self._adapter_factory = adapter_factory
         self._runtime_factory = runtime_factory
@@ -237,6 +240,8 @@ class RunManager:
         self._broadcaster = EventBroadcaster()
         self._background: _BackgroundLoop | None = None
         self._background_lock = threading.Lock()
+        self._index: RunIndex | None = None
+        self._index_lock = threading.Lock()
 
     def _get_background(self) -> _BackgroundLoop:
         with self._background_lock:
@@ -250,6 +255,10 @@ class RunManager:
             if self._background is not None:
                 self._background.stop()
                 self._background = None
+        with self._index_lock:
+            if self._index is not None:
+                self._index.close()
+                self._index = None
 
     @property
     def broadcaster(self) -> EventBroadcaster:
@@ -280,6 +289,29 @@ class RunManager:
         return (
             self._costs_path if self._costs_path is not None else paths.costs_path()
         )
+
+    @property
+    def index_path(self) -> Path:
+        if self._index_path is not None:
+            return self._index_path
+        return self.runs_root.parent / "index.db"
+
+    def _get_index(self) -> RunIndex:
+        with self._index_lock:
+            if self._index is None:
+                self._index = RunIndex(self.index_path)
+            return self._index
+
+    def reconcile_index(self) -> int:
+        """Rebuild the SQLite index from disk. Called at service startup.
+
+        Short-circuits when ``runs_root`` does not yet exist — a fresh install
+        has nothing to reconcile and we would rather not materialise the index
+        file in the user profile until the first real run is written.
+        """
+        if not self.runs_root.is_dir():
+            return 0
+        return self._get_index().reconcile(self.runs_root)
 
     def get(self, run_id: str) -> RunHandle | None:
         return self._runs.get(run_id)
@@ -353,6 +385,7 @@ class RunManager:
             mode=mode,
             runs_root=self.runs_root,
             broadcaster=self._broadcaster,
+            run_index=self._get_index(),
         )
         queue = _BroadcastingConfirmationQueue(self._broadcaster)
         budget = RunBudget.from_skill_meta(loaded.meta)
@@ -456,44 +489,25 @@ class RunManager:
     ) -> list[dict[str, Any]]:
         """Return a list of run summaries sorted by ``started_at`` descending.
 
-        Fallback filesystem scan: X-020 will replace this with a SQLite index.
-        Unreadable or malformed ``run_metadata.json`` files are skipped with a
-        warning so one bad run directory doesn't blind the whole listing.
+        Served from the SQLite index (X-020). ``started_at`` may be ``None``
+        for rows that have not transitioned past ``pending`` yet; the index
+        sorts those below any row with a timestamp.
         """
-        import json
-
-        root = self.runs_root
-        if not root.is_dir():
-            return []
-
-        summaries: list[dict[str, Any]] = []
-        for child in root.iterdir():
-            metadata_file = child / "run_metadata.json"
-            if not metadata_file.is_file():
-                continue
-            try:
-                data = json.loads(metadata_file.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                logger.warning(
-                    "skipping unreadable run metadata at %s", metadata_file
-                )
-                continue
-            if skill_slug is not None and data.get("skill_slug") != skill_slug:
-                continue
-            summaries.append(
-                {
-                    "run_id": data.get("run_id"),
-                    "skill_slug": data.get("skill_slug"),
-                    "status": data.get("status"),
-                    "started_at": data.get("started_at"),
-                    "ended_at": data.get("ended_at"),
-                    "duration_seconds": _duration_seconds(data),
-                    "total_cost_usd": data.get("total_cost_usd"),
-                }
-            )
-
-        summaries.sort(key=lambda s: s["started_at"] or "", reverse=True)
-        return summaries[offset : offset + limit]
+        index = self._get_index()
+        rows = index.list(skill_slug=skill_slug, limit=limit, offset=offset)
+        return [
+            {
+                "run_id": r["run_id"],
+                "skill_slug": r["skill_slug"],
+                "status": r["status"],
+                "mode": r["mode"],
+                "started_at": r["started_at"],
+                "ended_at": r["ended_at"],
+                "duration_seconds": r["duration_seconds"],
+                "total_cost_usd": r["total_cost_usd"],
+            }
+            for r in rows
+        ]
 
     def get_metadata(self, run_id: str) -> dict[str, Any]:
         """Return the parsed ``run_metadata.json`` for ``run_id``."""
@@ -536,22 +550,6 @@ class RunManager:
         if not candidate.is_file():
             raise RunNotFound(f"screenshot not found: {filename}")
         return candidate
-
-
-def _duration_seconds(data: dict[str, Any]) -> float | None:
-    """Return seconds between ``started_at`` and ``ended_at`` if both present."""
-    from datetime import datetime
-
-    started = data.get("started_at")
-    ended = data.get("ended_at")
-    if not isinstance(started, str) or not isinstance(ended, str):
-        return None
-    try:
-        s = datetime.fromisoformat(started.replace("Z", "+00:00"))
-        e = datetime.fromisoformat(ended.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return (e - s).total_seconds()
 
 
 __all__ = [

@@ -243,7 +243,12 @@ def build_app() -> FastAPI:
     uses the :data:`router` directly rather than this app.
     """
     app = FastAPI(title="Trace runner", version="0.1.0")
-    app.state.run_manager = RunManager()
+    manager = RunManager()
+    try:
+        manager.reconcile_index()
+    except Exception:  # pragma: no cover - startup resilience
+        logger.exception("reconcile_index at startup failed")
+    app.state.run_manager = manager
     app.include_router(router)
     return app
 

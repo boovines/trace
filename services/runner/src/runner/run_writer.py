@@ -32,6 +32,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Any, Final
 
+from runner.run_index import RunIndex
 from runner.schema import RunMetadata
 
 _PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
@@ -55,6 +56,7 @@ class RunWriter:
         skill_slug: str,
         mode: str,
         runs_root: Path,
+        run_index: RunIndex | None = None,
     ) -> None:
         self._run_id = run_id
         self._skill_slug = skill_slug
@@ -67,11 +69,20 @@ class RunWriter:
         self._lock = threading.RLock()
         self._closed = False
         self._last_metadata_bytes: bytes | None = None
+        self._run_index = run_index
 
         self._run_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self._run_dir, _DIR_PERMS)
         self._screenshots_dir.mkdir(parents=True, exist_ok=True)
         os.chmod(self._screenshots_dir, _DIR_PERMS)
+
+        if run_index is not None:
+            run_index.upsert(
+                run_id=run_id,
+                skill_slug=skill_slug,
+                status="pending",
+                mode=mode,
+            )
 
     @property
     def run_dir(self) -> Path:
@@ -118,6 +129,8 @@ class RunWriter:
                 return
             _atomic_write_bytes(self._metadata_path, serialized)
             self._last_metadata_bytes = serialized
+            if self._run_index is not None:
+                self._run_index.upsert_from_metadata(metadata)
 
     def update_status(self, metadata: RunMetadata, status: str, **fields: Any) -> RunMetadata:
         """Return a metadata object with ``status`` (and any fields) updated, writing it.

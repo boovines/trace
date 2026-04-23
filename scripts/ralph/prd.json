@@ -635,7 +635,7 @@
         "pytest passes"
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": "Sharing index.db with the recorder and synthesizer is fine \u2014 SQLite handles concurrent reads well and the write volume is low. Each service owns its own tables."
     },
     {
