@@ -420,7 +420,7 @@
         "pytest passes"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "Using Haiku for this evaluator is a deliberate cost choice. The rubric is simple enough that Haiku handles it well; Sonnet would be 5x the cost for no material accuracy gain. The structural dimensions (parameter count, destructive count) don't need an LLM at all — compute directly."
     },
     {

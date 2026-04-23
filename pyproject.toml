@@ -43,6 +43,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # only obscure the content the model actually sees.
 "services/synthesizer/src/synthesizer/draft_prompt.py" = ["E501"]
 "services/synthesizer/src/synthesizer/revise_prompt.py" = ["E501"]
+"services/synthesizer/src/synthesizer/similarity.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"

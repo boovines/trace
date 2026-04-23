@@ -8,7 +8,8 @@ Anthropic base URL; tests register routes on it to script responses.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import pytest
 import respx
@@ -49,6 +50,21 @@ def anthropic_mock() -> Iterator[respx.MockRouter]:
         assert_all_called=False,
     ) as router:
         yield router
+
+
+@pytest.fixture
+def similarity_scorer() -> Callable[..., Any]:
+    """Expose :func:`synthesizer.similarity.score_skill_similarity` for reuse.
+
+    S-014 requires a pytest fixture named ``similarity_scorer`` so downstream
+    suites (S-017 real-mode smoke) can depend-inject the scorer rather than
+    re-importing it. The fixture resolves the function lazily so importing
+    conftest does not transitively import the full LLM stack just for
+    collection.
+    """
+    from synthesizer.similarity import score_skill_similarity
+
+    return score_skill_similarity
 
 
 @pytest.fixture(autouse=True)
