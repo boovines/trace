@@ -395,7 +395,7 @@
         "pytest passes"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "SSE keepalives matter — without them, some proxies kill the connection at 30-60s idle. This is for the Tauri app's local HTTP, not a real proxy, but it's good practice and cheap."
     },
     {

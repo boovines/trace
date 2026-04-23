@@ -25,7 +25,7 @@ def test_api_router_mounts_and_serves_status() -> None:
     with TestClient(app) as client:
         resp = client.get("/synthesize/status")
     assert resp.status_code == 200
-    assert resp.json() == {"module": "synthesizer", "status": "scaffold"}
+    assert resp.json() == {"module": "synthesizer", "status": "ok"}
 
 
 def test_anthropic_mock_intercepts_requests(anthropic_mock: respx.MockRouter) -> None:
