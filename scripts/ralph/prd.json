@@ -243,7 +243,7 @@
         "pytest passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "This is the integration point where the event-tap thread hands events to the writer. The lock around seq assignment + writer.append_event is critical — without it, seq values can collide under high event rate."
     },
     {

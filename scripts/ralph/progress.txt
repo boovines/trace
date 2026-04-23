@@ -34,6 +34,9 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **Stateless policy modules**: `recorder.keyframe_policy.KeyframePolicy` is stateless — the session passes `(event_type, seconds_since_last_keyframe)` each call and the policy answers yes/no + reason. The session owns the "time since last keyframe" state and the periodic timer. Prefer this shape for any future rule-based gate (e.g. scroll-debounce) — stateless is easier to test, thread-safe by construction, and doesn't couple the rule to a particular timer impl.
 - **Class-level state in PyObjC test doubles**: when emulating the `cls.alloc().init…_(…)` two-step idiom, do NOT use mutable class attributes at the base class (RUF012). Either put state on the instance, or declare `ClassVar[...]` explicitly, or create a fresh subclass per test via `type("Name", (Base,), {...})` — the screenshot stub uses the subclass trick so each test's `rep_calls` list is isolated.
 - **PNG validation without Pillow**: the `recorder.screenshot` module exposes `PNG_MAGIC = b"\\x89PNG\\r\\n\\x1a\\n"` and rejects bytes that don't start with it. Tests synthesize a minimal valid PNG by hand (magic + IHDR + one compressed IDAT + IEND, with `zlib.crc32` for the per-chunk CRC) — avoid adding Pillow just to verify PNG shape. Dimension parsing uses `struct.unpack(">II", png[16:24])` once you've asserted `png[12:16] == b"IHDR"`.
+- **RecordingSession owns `seq`**: `recorder.session.RecordingSession` is the single place where `seq` values are minted for a running trajectory. `TrajectoryWriter` still has its own auto-seq counter (belt-and-suspenders), but every normal emit path passes a pre-assigned seq under the session's `_lock`. Any future capture path that does NOT go through the session (e.g. an HTTP admin endpoint that injects events) must either acquire the same lock or accept interleaved seqs.
+- **Session dependency injection**: every macOS-dependent piece of `RecordingSession` is injected via a constructor kwarg (`event_tap_factory`, `focus_tracker_factory`, `text_aggregator_factory`, `permissions_check`, `ax_resolver`, `screenshot_capturer`, `display_info_provider`, `keyframe_policy`). Hermetic tests pass fakes; real use passes nothing and defaults fall back to the real modules. Keep this pattern for any future orchestrator — it is the only way tests can run in Ralph's sandbox without PyObjC.
+- **Dual-lock orchestrator pattern**: `_start_stop_lock` serialises `start()`/`stop()` bookkeeping; `_lock` guards per-event state (seq, writer.append_event, last-keyframe-time, pending timers). Do NOT collapse them — `stop()` spends non-trivial time joining threads and holding that on the per-event lock would starve capture callbacks. Capture-thread callbacks check `self._active` under `_lock` and bail if False, so late callbacks after `stop()` are silent no-ops.
 
 ---
 
@@ -280,4 +283,44 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - Keep keyframe policy stateless. The session orchestrator (R-010) will own: `last_keyframe_time`, the periodic `threading.Timer`, the post-click delayed capture (use `threading.Timer(0.1, …)`). The policy is pure — `reason = policy.reason_for(kind, time.monotonic() - last)` — no race conditions, no test-only time injection needed inside the policy.
   - Do NOT add Pillow just to validate PNGs in tests. `b"\\x89PNG\\r\\n\\x1a\\n"` + the IHDR chunk format (`length(4) + "IHDR" + width(4) + height(4) + …`) is enough to crc-check + dimension-check with `struct` and `zlib`.
   - Post-click keyframe delay (`POST_CLICK_DELAY_SECONDS = 0.1`) is owned by the policy constants but enforced by the session via `threading.Timer`. If you need to tighten it in tests, pass a shorter `post_click_delay_seconds` to `KeyframePolicy` rather than monkey-patching the module constant.
+---
+
+## 2026-04-23 - R-010
+- Landed `services/recorder/src/recorder/session.py` — `RecordingSession` orchestrator wiring EventTap + FocusTracker + TextAggregator + keyframe policy + screenshot capture into a single `TrajectoryWriter`.
+  - Every macOS-dependent dependency (EventTap, FocusTracker, TextAggregator, ax_resolver, screenshot_capturer, display_info_provider, permissions_check, KeyframePolicy) is injected via constructor kwarg — defaults come from the real recorder modules, tests inject hermetic fakes.
+  - Two locks: `_start_stop_lock` serialises start()/stop() bookkeeping; `_lock` guards seq + writer.append_event + last-keyframe-time + the pending post-click-timer list. Capture-thread callbacks bail early when `_active` is False so `stop()` can tear down components without holding `_lock`.
+  - Click envelope: pre-click keyframe → AX resolve (outside the lock — can take up to 200ms) → click schema event → post-click keyframe scheduled via `threading.Timer(post_click_delay_seconds)`. Delay=0 fires synchronously, which keeps hermetic tests deterministic.
+  - Periodic keyframes run on a dedicated daemon thread polling `_stop_event.wait(max(0.05, min(0.5, interval/2)))` and calling `KeyframePolicy.should_capture("tick", elapsed)` under the lock.
+  - Event translation: event_tap's long-form modifier names (`"command"`) are mapped to schema enum short forms (`"cmd"`) by `_translate_modifiers`. `_CLICK_BUTTON_BY_TYPE` converts `left_mouse_down` / `right_mouse_down` / `other_mouse_down` → `left` / `right` / `other`. Shortcut chords (cmd/ctrl/opt held) skip the TextAggregator and emit a schema `keypress`; non-shortcut keys go to the aggregator.
+  - Scroll handling picks direction by |dx| vs |dy|, emits `{direction, delta}`; zero-delta scrolls are dropped silently.
+  - `text_input` events override the `app` field with the bundle_id the text buffer was attached to (not the currently focused app) — matches the TextAggregator's ownership model. Empty buffers never emit (aggregator drops them, session also defends).
+  - App switches clear the TextAggregator focus (`set_focus(to_bundle_id, None, None)`) so keystrokes after the switch start a fresh buffer. `app_switch` payload omits `from_*` keys when None to keep JSONL tidy, rather than writing explicit `null` keys.
+  - `window_focus` events drop empty/None titles before emit — otherwise synth prompts get littered with useless `""` titles.
+  - `stop()` is idempotent, returns the cached summary on subsequent calls. `duration_ms` is computed from `time.monotonic()` (wall-clock independent). `trajectory_id` stays queryable after stop via `self._summary`. Session is single-shot per the PRD — double-start raises `SessionAlreadyActiveError`.
+  - `_finalise_metadata` rewrites `metadata.json` with `focus_tracker.get_app_focus_history()` before `writer.close()` runs its own `stopped_at` pass — so history + stopped_at co-resident in the final file.
+  - Three new exceptions: `SessionAlreadyActiveError`, `SessionNotActiveError`, `PermissionsMissingError` (carries the structured `PermissionsError` dict for the HTTP layer to return verbatim).
+- Added `tests/recorder/test_session.py` (24 hermetic tests):
+  - Lifecycle: start creates trajectory+metadata, start-twice / single-shot / stop-without-start / idempotent-stop raise correctly, permissions-missing → PermissionsMissingError with zero disk leak.
+  - Click envelope: pre-click keyframe + AX-resolved click + post-click keyframe with zero-pad screenshots written; AX returns None / AX raises / screenshot returns None / screenshot raises all handled without dropping the click.
+  - Periodic keyframes: with a 50ms policy interval, sleeping 250ms yields ≥2 periodic keyframes.
+  - Scroll direction picks dominant axis; zero-delta dropped.
+  - Shortcut vs non-shortcut: shortcut → schema keypress with `modifiers` + `keys`; non-shortcut → forwarded to TextAggregator; empty text_input buffer suppressed.
+  - App switch: writes schema app_switch + keyframe, clears aggregator focus, from_* fields omitted when None.
+  - Window focus empty title ignored, tap_reenabled surfaces schema event with `cause`.
+  - Metadata: `stopped_at` finalised, `app_focus_history` populated via FocusTracker handoff; fallback `{width:1,height:1,scale:1.0}` when provider returns None.
+  - Concurrency: 5 threads × 20 scroll events give 100 monotonically-increasing, unique seq values.
+  - Late callbacks after stop are silent no-ops; `with session:` context manager auto-stops on exit.
+- Files changed:
+  - `services/recorder/src/recorder/session.py` (moved from untracked → tracked + lint cleanup)
+  - `tests/recorder/test_session.py` (new)
+  - `scripts/ralph/prd.json` (R-010 passes=true)
+  - `scripts/ralph/progress.txt` (this entry)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (208 passed, 4 skipped; opt-in macOS tests for event_tap, ax_resolver, focus_tracker, screenshot).
+- **Learnings for future iterations:**
+  - The session owns the **only** `seq` counter in the recorder. The writer's own auto-seq counter is still in place (belt-and-suspenders) but every session emit passes a pre-assigned seq under `_lock`. If a future story (R-011 API, R-014 e2e) emits events via a path that does NOT go through the session, that path MUST either acquire the same lock or accept that seqs may interleave.
+  - `post_click_delay_seconds=0.0` makes the post-click keyframe synchronous — use this in hermetic tests so the expected event order is deterministic. Real sessions use 0.1s (a `threading.Timer`).
+  - When mocking the capture layer, the Fake FocusTracker MUST also implement `stop()` side-effects (finalising the last history entry's `exited_at`) if the test re-reads metadata.json and asserts on `exited_at`. The real FocusTracker does this in `stop()`; tests that skip this invariant silently pass `exited_at=None` into the metadata and then fail downstream.
+  - `screenshot_ref` in events.jsonl uses the ZERO-PADDED seq (4 digits) — the schema pattern `^screenshots/\d{4,}\.png$` allows ≥4 digits so sessions >9999 events still validate. The session uses `f"screenshots/{seq:04d}.png"` which matches both the writer's `write_screenshot` padding and the schema pattern.
+  - Dual-lock layout: a coarse `_start_stop_lock` for lifecycle + a fine `_lock` for per-event state. Do NOT fold them into one — `start()` and `stop()` spend non-trivial time stopping threads and joining; holding that time on the per-event lock would starve capture callbacks.
+  - For the HTTP layer (R-011): `PermissionsMissingError.error` is a dict that already matches the expected 403 response body; forward it directly. `SessionAlreadyActiveError` → 409; `SessionNotActiveError` → 409.
 ---
