@@ -280,7 +280,7 @@
         "pytest passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "The numeric-suffix-only rule is deliberate — avoids the _v2 / _copy / _new ambiguity that plagues file systems. The user can always specify a custom slug during Q&A to avoid the suffix."
     },
     {
