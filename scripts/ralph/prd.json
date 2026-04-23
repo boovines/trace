@@ -486,7 +486,7 @@
         "pytest passes"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "This is the third and strictest destructive gate. The first two (skill \u26a0\ufe0f markers + <needs_confirmation> tag) depend on the LLM doing the right thing. This one does NOT \u2014 it inspects the actual screen state at action time. If the LLM somehow emits a tool_use to click Send and doesn't flag it, this gate catches it. Live mode only \u2014 in dry run we trust the skill's flags."
     },
     {
