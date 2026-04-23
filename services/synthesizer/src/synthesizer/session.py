@@ -32,6 +32,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from synthesizer.budget import BudgetMonitor, BudgetStatus
 from synthesizer.draft import (
     DraftGenerationError,
     DraftResult,
@@ -208,6 +209,7 @@ class SynthesisSession:
         revise_fn: ReviseFn | None = None,
         writer: SkillWriter | None = None,
         clock: Callable[[], float] | None = None,
+        budget_monitor: BudgetMonitor | None = None,
     ) -> None:
         self.session_id: str = session_id or uuid.uuid4().hex
         self.trajectory_id: str = trajectory_id
@@ -226,6 +228,7 @@ class SynthesisSession:
         self._writer: SkillWriter = writer or SkillWriter()
         self._clock: Callable[[], float] = clock or time.monotonic
         self._last_updated_at: float = self._clock()
+        self._budget: BudgetMonitor | None = budget_monitor
 
     # -- state mutation ----------------------------------------------------
 
@@ -303,6 +306,8 @@ class SynthesisSession:
         self.draft = draft
         self.questions = list(draft.questions)
         self.costs_so_far_usd = draft.total_cost_usd
+        if self._enforce_budget():
+            return
         if self.questions:
             self._transition(SessionState.AWAITING_ANSWER)
         else:
@@ -372,6 +377,9 @@ class SynthesisSession:
         # already logged so next_question() skips them.
         self.questions = list(revised.questions)
         self.costs_so_far_usd = revised.total_cost_usd
+
+        if self._enforce_budget():
+            return
 
         if self.next_question() is not None:
             self._transition(SessionState.AWAITING_ANSWER)
@@ -465,6 +473,23 @@ class SynthesisSession:
         self.error = message
         LOGGER.warning("session %s failed: %s", self.session_id, message)
         self._transition(SessionState.ERRORED)
+
+    def _enforce_budget(self) -> bool:
+        """Check the per-session cost cap after a draft/revision completes.
+
+        Returns ``True`` when the session was transitioned to ``errored``
+        (caller should short-circuit), ``False`` when the session may proceed.
+        Safe to call with no monitor attached (treated as disabled).
+        """
+        if self._budget is None:
+            return False
+        result = self._budget.check_session_cost(
+            self.session_id, self.costs_so_far_usd
+        )
+        if result.status == BudgetStatus.EXCEEDED:
+            self._fail("per-session cost cap exceeded")
+            return True
+        return False
 
     # -- persistence -------------------------------------------------------
 

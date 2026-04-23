@@ -44,6 +44,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from synthesizer.budget import BudgetMonitor, BudgetStatus
 from synthesizer.draft import generate_draft
 from synthesizer.llm_client import LLMClient, trace_data_dir
 from synthesizer.revise import generate_revision
@@ -82,6 +83,7 @@ _STORE: SessionStore = SessionStore()
 _DRAFT_FN: DraftFn = generate_draft
 _REVISE_FN: ReviseFn = generate_revision
 _WRITTEN_RESULTS: dict[str, WrittenSkill] = {}
+_BUDGET_MONITOR_FACTORY: Callable[[], BudgetMonitor] = BudgetMonitor
 # Strong refs to background tasks so they aren't GC'd mid-flight. asyncio.create_task
 # returns a weak reference inside the loop's task set; see Python 3.11 docs note.
 _BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
@@ -136,6 +138,16 @@ def status() -> dict[str, str]:
 @router.post("/synthesize/start")
 async def start_synthesis(req: StartRequest) -> dict[str, str]:
     """Create a new synthesis session and kick off phase-1 draft generation."""
+    monitor = _BUDGET_MONITOR_FACTORY()
+    daily = monitor.check_daily_cost()
+    if daily.status == BudgetStatus.EXCEEDED:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"daily synthesizer cost cap of ${daily.cap_usd:.2f} exceeded "
+                f"(current ${daily.current_usd:.4f}); try again tomorrow"
+            ),
+        )
     trajectory_dir = _trajectories_root() / req.trajectory_id
     if not trajectory_dir.is_dir():
         raise HTTPException(
@@ -155,6 +167,7 @@ async def start_synthesis(req: StartRequest) -> dict[str, str]:
         skills_root=_skills_root(),
         draft_fn=_DRAFT_FN,
         revise_fn=_REVISE_FN,
+        budget_monitor=monitor,
     )
     _STORE.add(session)
     # Run the blocking draft call on a worker thread so the HTTP response

@@ -517,7 +517,7 @@
         "pytest passes"
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": "The per-session cap is the first line of defense against a retry loop going wild. The daily cap is the second line. Ralph iterations should have a LOWER cap (e.g., $1/day) set via the dev profile config; the Ralph loop prompt should ensure it sets this before iteration."
     },
     {
