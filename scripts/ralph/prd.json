@@ -426,7 +426,7 @@
         "pytest passes"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "The wait cap is a defense against an agent that decides to sleep for a day. The coordinate mapping is where X-006 either pays off or burns us."
     },
     {
