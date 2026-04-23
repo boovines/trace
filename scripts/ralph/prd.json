@@ -686,7 +686,7 @@
         "pytest passes"
       ],
       "priority": 22,
-      "passes": false,
+      "passes": true,
       "notes": "This test is the counterpart to the synthesizer's similarity test \u2014 rather than comparing two skill files, it compares a run against a trajectory. It catches regressions where the fake-mode scripts drift from realistic agent behavior."
     },
     {

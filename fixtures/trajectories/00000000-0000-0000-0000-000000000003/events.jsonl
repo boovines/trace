@@ -1,0 +1,6 @@
+{"t": "2026-04-20T16:00:03Z", "kind": "screenshot", "screenshot_ref": "screenshots/0001.png"}
+{"t": "2026-04-20T16:00:05Z", "kind": "mouse_down", "button": "left", "x": 110, "y": 26, "note": "step=2;target=Downloads folder"}
+{"t": "2026-04-20T16:00:05.020Z", "kind": "mouse_up", "button": "left", "x": 110, "y": 26}
+{"t": "2026-04-20T16:00:07Z", "kind": "screenshot", "screenshot_ref": "screenshots/0002.png"}
+{"t": "2026-04-20T16:00:35Z", "kind": "mouse_down", "button": "left", "x": 600, "y": 400, "note": "step=5;target=Move to Archive;destructive=true"}
+{"t": "2026-04-20T16:00:35.020Z", "kind": "mouse_up", "button": "left", "x": 600, "y": 400}

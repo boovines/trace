@@ -25,7 +25,7 @@
           "type": "tool_use",
           "id": "toolu_slack_2",
           "name": "computer",
-          "input": {"action": "left_click", "coordinate": [1480, 70]}
+          "input": {"action": "left_click", "coordinate": [1400, 70]}
         }
       ]
     },

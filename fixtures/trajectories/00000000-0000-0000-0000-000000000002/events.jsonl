@@ -1,0 +1,6 @@
+{"t": "2026-04-20T15:00:03Z", "kind": "screenshot", "screenshot_ref": "screenshots/0001.png"}
+{"t": "2026-04-20T15:00:05Z", "kind": "mouse_down", "button": "left", "x": 24, "y": 65, "note": "step=2;target=Create event button"}
+{"t": "2026-04-20T15:00:05.020Z", "kind": "mouse_up", "button": "left", "x": 24, "y": 65}
+{"t": "2026-04-20T15:00:07Z", "kind": "screenshot", "screenshot_ref": "screenshots/0002.png"}
+{"t": "2026-04-20T15:01:05Z", "kind": "mouse_down", "button": "left", "x": 900, "y": 500, "note": "step=7;target=Save event;destructive=true"}
+{"t": "2026-04-20T15:01:05.020Z", "kind": "mouse_up", "button": "left", "x": 900, "y": 500}
