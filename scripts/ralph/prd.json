@@ -256,7 +256,7 @@
         "pytest passes"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "This is the 'Runner safety' insurance policy at the synthesizer layer. The Runner has its OWN live-execution keyword matcher as a third line of defense, but adding it here means the skill file on disk is already correct. The i18n limitation is a documented non-goal for v1."
     },
     {

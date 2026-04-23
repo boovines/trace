@@ -29,12 +29,16 @@ import base64
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from jsonschema import ValidationError  # type: ignore[import-untyped]
 from pydantic import BaseModel, ConfigDict
 
+from synthesizer.destructive_matcher import (
+    MatcherReport,
+    apply_destructive_matcher,
+)
 from synthesizer.draft_prompt import DRAFT_OUTPUT_KEYS, DRAFT_SYSTEM_PROMPT
 from synthesizer.llm_client import (
     DEFAULT_MAX_TOKENS,
@@ -48,6 +52,7 @@ from synthesizer.skill_doc import (
     ParsedSkill,
     SkillParseError,
     parse_skill_md,
+    render_skill_md,
 )
 from synthesizer.trajectory_reader import TrajectoryReader
 
@@ -119,6 +124,7 @@ class DraftResult:
     questions: list[Question]
     llm_calls: int
     total_cost_usd: float
+    matcher_report: MatcherReport = field(default_factory=MatcherReport)
 
 
 # --- Message building -------------------------------------------------------
@@ -380,6 +386,24 @@ def generate_draft(
             messages.append({"role": "user", "content": err.feedback})
             continue
 
+        # Belt-and-suspenders: independent keyword scan over the source
+        # clicks. Matches are strictly additive — the LLM's flags are never
+        # unset. When the matcher adds a flag, the markdown and meta are
+        # re-derived so the final DraftResult is internally consistent
+        # (validate_meta_against_markdown must still pass).
+        matcher = apply_destructive_matcher(parsed, reader)
+        if matcher.report.added_flags:
+            parsed = matcher.parsed
+            markdown = render_skill_md(parsed)
+            meta = dict(meta)
+            combined = sorted(
+                set(meta.get("destructive_steps", []))
+                | set(matcher.report.added_flags)
+            )
+            meta["destructive_steps"] = combined
+            validate_meta(meta)
+            validate_meta_against_markdown(meta, markdown)
+
         return DraftResult(
             markdown=markdown,
             parsed=parsed,
@@ -387,6 +411,7 @@ def generate_draft(
             questions=questions,
             llm_calls=len(attempts),
             total_cost_usd=sum(r.cost_estimate_usd for r in attempts),
+            matcher_report=matcher.report,
         )
 
     raise DraftGenerationError(
