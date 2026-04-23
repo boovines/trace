@@ -515,7 +515,7 @@
         "pytest passes"
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": "The 5-minute timeout on confirmation is deliberately short \u2014 if the user has walked away from their machine, the run should abort rather than sit open forever with the screenshot stale. UI must surface confirmations immediately with sound + notification."
     },
     {
