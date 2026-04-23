@@ -312,7 +312,7 @@
         "ruff check passes"
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": "For the Ralph loop, you can generate these fixtures synthetically (hand-crafted JSON that looks like what a real recording would produce). A human will replace them with real recordings during smoke testing. This is the one story where Ralph is NOT expected to produce real user data — synthetic fixtures that pass the schema are acceptable."
     },
     {

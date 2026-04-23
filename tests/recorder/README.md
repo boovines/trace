@@ -34,3 +34,24 @@ default, every iteration would either fail (noise) or pass trivially
 (silent skip). Making them opt-in keeps the default `pytest` green on the
 sandbox while still giving the human tester a single command to verify
 real hardware before shipping the module.
+
+## Reference-workflow fixtures
+
+`fixtures/trajectories/<slug>/` holds one canonical recording per
+reference workflow (`gmail_reply`, `calendar_block`, `finder_organize`,
+`slack_status`, `notes_daily`). `test_fixtures.py` asserts structural
+minimums on each: schema validity, monotonic 1-indexed `seq`, at least
+one click with an AX target, one `text_input` with a `field_label`, one
+`app_switch`, valid PNG per `screenshot_ref`, and total size under 5 MB.
+
+The checked-in fixtures are **synthetic** — produced by
+`scripts/generate_synthetic_fixtures.py` so downstream module tests
+(Synthesizer, Runner) can run without a real Mac. A human tester
+replaces them with real recordings during smoke testing per
+`scripts/regenerate_fixtures.sh`. Rerun the synthesizer whenever the
+schema changes:
+
+```sh
+uv run python scripts/generate_synthetic_fixtures.py
+uv run pytest tests/recorder/test_fixtures.py
+```

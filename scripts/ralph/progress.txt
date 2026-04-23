@@ -46,6 +46,7 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **SessionFactory signature includes IndexDB**: `recorder.api.SessionFactory = Callable[[Path, IndexDB | None], RecordingSession]`. Any test that substitutes `session_factory=FakeSession` must have `FakeSession.__init__(self, root, index_db=None)`, and should forward the index_db to its `TrajectoryWriter` so `list_trajectories` assertions see the rows. Changing the factory again later is a breaking change across every test suite that mocks a session — think twice.
 - **Where the index lives**: `<app_support>/index.db` (i.e., `default_trajectories_root().parent / "index.db"`), NOT inside the `trajectories/` directory.  `recorder.storage.default_index_db_path()` is the canonical resolver — reuse rather than hardcoding. Tests pin via the same `TRACE_PROFILE_DIR` override that controls `default_trajectories_root`.
 - **duration_ms tests must tolerate sign**: `TrajectoryWriter.close()` rewrites `stopped_at` to `now()`, so a hermetic test whose `started_at` is a fixed future date will produce a negative `duration_ms`. Either assert on presence-not-sign (`is not None`), OR overwrite the index row post-close with deterministic values (that's what `FakeSession.stop()` in `test_api.py` does — then `list_trajectories` can assert `duration_ms == 1500`).
+- **Fixtures are synthetic until a human re-records**: `fixtures/trajectories/<slug>/` is produced by `scripts/generate_synthetic_fixtures.py` (Ralph/CI path). Real recordings replace them during smoke testing per `scripts/regenerate_fixtures.sh`. Downstream tests that depend on fixtures must rely only on structural contracts (schema validity, per-type event counts) — never on the literal text of a `text_input` or the pixel contents of a screenshot. `tests/recorder/test_fixtures.py` is the reference structural check.
 
 ---
 
@@ -406,4 +407,26 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - When converting `try/except/pass` to `contextlib.suppress(Exception)`, ruff `SIM105` flags the former AND `RUF100` flags any `# noqa: BLE001` that was there because `BLE001` is not enabled in this repo's ruff config. Don't add `# noqa: BLE001` pre-emptively.
   - `mypy --strict` is happy with the `SessionFactory = Callable[[Path, IndexDB | None], RecordingSession]` signature only if `IndexDB` is imported at module top level in `api.py` (not in `TYPE_CHECKING` — Callable definitions at module scope are evaluated at import time).
   - Recording tests where `started_at` is a fixed future date (e.g., "2026-04-23T12:00:00.000+00:00") will produce a NEGATIVE `duration_ms` through `TrajectoryWriter.close()` because close writes `stopped_at = now()`. Assert presence, not sign — or overwrite the index row post-close with deterministic values.
+---
+
+## 2026-04-23 - R-013
+- Added the five reference-workflow trajectory fixtures under `fixtures/trajectories/{gmail_reply, calendar_block, finder_organize, slack_status, notes_daily}/`. Each fixture has a schema-valid `metadata.json`, an `events.jsonl` with 11–12 events (including at minimum 1 click-with-AX-target, 1 text_input with field_label, 1 app_switch), and a `screenshots/` directory with tiny structurally-valid PNG keyframes. Total fixtures directory: ~150 KB (well under the 5 MB cap).
+- Added `scripts/generate_synthetic_fixtures.py` — a deterministic Python synthesizer that validates every event/metadata via `recorder.schema` before writing. Hand-crafted per-workflow event scripts use short helpers (`_click`, `_text_input`, `_app_switch`, `_keyframe`, …) so the event lists stay flat and human-readable. `seq` / `timestamp_ms` are assigned post-hoc from `BASE_EPOCH_MS` so the events list can be reordered without renumbering by hand.
+- Added `scripts/regenerate_fixtures.sh` — human-only checklist documenting how to re-record the five workflows live and copy the real trajectory directories into `fixtures/trajectories/<slug>/` during smoke testing. It also points at the synthetic fallback for Ralph/CI.
+- Added `tests/recorder/test_fixtures.py` (36 tests): directory layout, metadata validity, per-event schema validity, monotonic 1-indexed seq, R-013 per-fixture minimums (click+target / text_input+label / app_switch), every `screenshot_ref` resolves to a valid PNG on disk, and the 5 MB total-size cap.
+- Updated `tests/recorder/README.md` with a "Reference-workflow fixtures" section describing the synthetic-vs-real split and the regeneration command.
+- Files changed:
+  - `scripts/generate_synthetic_fixtures.py` (new)
+  - `scripts/regenerate_fixtures.sh` (new, executable)
+  - `fixtures/trajectories/{gmail_reply, calendar_block, finder_organize, slack_status, notes_daily}/{metadata.json, events.jsonl, screenshots/*.png}` (new)
+  - `tests/recorder/test_fixtures.py` (new)
+  - `tests/recorder/README.md`
+  - `scripts/ralph/prd.json` (R-013 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder scripts/`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (297 tests, 4 skipped macOS-only).
+- **Learnings for future iterations:**
+  - When synthesizing PNGs inline (no Pillow), reuse the `PNG_MAGIC + IHDR + IDAT + IEND` recipe already used in `tests/recorder/test_screenshot.py::_make_min_png` rather than inventing another variant. ~60 bytes per PNG keeps 40+ synthetic keyframes comfortably inside the 5 MB fixtures cap.
+  - Ruff's `RUF001` flags en-dash (`–`) in string literals. Use plain hyphen (`-`) in synthesized fixture labels — no reason to invite the difference.
+  - Ruff's `RUF007` prefers `itertools.pairwise(xs)` over `zip(xs, xs[1:], strict=False)` for successive-pair iteration. Reach for `itertools.pairwise` by default.
+  - The synthesizer must bootstrap `sys.path` to include `services/recorder/src` so `from recorder.schema import …` works when run as a plain `python scripts/…` script (without `uv run`). `uv run python scripts/generate_synthetic_fixtures.py` is the canonical form but the path insert keeps direct invocation working too.
+  - `validate_event(...)` from `recorder.schema` is cheap (cached validator under the hood) — call it per-event inside the synthesizer so a schema bump never lands in fixtures silently.
 ---
