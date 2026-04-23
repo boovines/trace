@@ -663,7 +663,7 @@
         "pytest passes"
       ],
       "priority": 21,
-      "passes": false,
+      "passes": true,
       "notes": "This is where the module gets its 'dry-run Ralph completion' signal. All 5 reference skills completing end-to-end in fake-mode is the strongest available signal short of real hardware. The pre-action gate test is specifically designed to catch a class of bug that the prompt-level gate alone could miss."
     },
     {
