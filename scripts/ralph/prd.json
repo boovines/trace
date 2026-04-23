@@ -444,7 +444,7 @@
         "pytest passes"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "Fake-mode is what makes this test runnable in Ralph's sandbox without an API key. Real-mode verification happens in S-017."
     },
     {
