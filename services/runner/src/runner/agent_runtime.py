@@ -23,6 +23,8 @@ from typing import Any, Protocol, runtime_checkable
 
 from anthropic.types import MessageParam
 
+from runner.coords import ImageMapping
+
 Message = MessageParam
 
 
@@ -48,6 +50,14 @@ class AgentRuntime(Protocol):
         max_tokens: int = 4096,
     ) -> AgentResponse:
         """Send one turn to the model and return the structured response."""
+
+    def set_image_mapping(self, mapping: ImageMapping | None) -> None:
+        """Propagate the latest screenshot's ``ImageMapping`` to the runtime.
+
+        The computer tool's ``display_width_px``/``display_height_px`` come
+        from this mapping; the executor calls it after every new screenshot so
+        the next turn's tool schema reports the right dims.
+        """
 
 
 __all__ = ["AgentResponse", "AgentRuntime", "Message"]

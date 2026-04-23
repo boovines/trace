@@ -271,6 +271,9 @@ class OpenAIRuntime:
     ) -> AgentResponse:
         raise NotImplementedError
 
+    def set_image_mapping(self, mapping: ImageMapping | None) -> None:
+        raise NotImplementedError
+
 
 def _fake_response(
     *,

@@ -550,7 +550,7 @@
         "pytest passes"
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": "This is the integration point for everything else in the module. The test coverage here is what gives us confidence the module works end-to-end. The 'agent_stuck' recovery prevents a model failure mode where it just narrates without acting \u2014 worth failing fast rather than burning tokens."
     },
     {
