@@ -309,7 +309,7 @@
         "pytest passes"
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": "Atomic-write-then-register is the correct ordering. If we registered first and the file write failed, the index would lie."
     },
     {
