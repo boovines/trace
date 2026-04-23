@@ -365,7 +365,7 @@
         "pytest passes"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Re-running the destructive matcher after every revision is critical — the LLM might inadvertently remove a ⚠️ marker while restructuring text. This is paranoia but cheap paranoia."
     },
     {

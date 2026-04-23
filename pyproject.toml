@@ -42,6 +42,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # prose paragraphs regularly exceed 100 chars and hard-wrapping them would
 # only obscure the content the model actually sees.
 "services/synthesizer/src/synthesizer/draft_prompt.py" = ["E501"]
+"services/synthesizer/src/synthesizer/revise_prompt.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
