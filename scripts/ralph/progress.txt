@@ -430,3 +430,20 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - The synthesizer must bootstrap `sys.path` to include `services/recorder/src` so `from recorder.schema import …` works when run as a plain `python scripts/…` script (without `uv run`). `uv run python scripts/generate_synthetic_fixtures.py` is the canonical form but the path insert keeps direct invocation working too.
   - `validate_event(...)` from `recorder.schema` is cheap (cached validator under the hood) — call it per-event inside the synthesizer so a schema bump never lands in fixtures silently.
 ---
+
+## 2026-04-23 - R-015
+- Authored `tests/recorder/smoke.md` — human-run checklist covering the 5 reference workflows (gmail_reply, calendar_block, finder_organize, slack_status, notes_daily), a kill-tap resilience test, a permission-denial test, aggregate storage-sanity checks, and a Sign-off section with `_____` placeholders.
+- Added a pre-promise guard to `scripts/ralph/CLAUDE.md`: on `feat/recorder`, Ralph must scan `tests/recorder/smoke.md` for `_____` placeholders in the Sign-off section. If any remain, Ralph prints `awaiting human smoke test` instead of emitting `<promise>COMPLETE</promise>`.
+- Flipped `R-015.passes` to `true` in `scripts/ralph/prd.json`. All 15 recorder stories now pass their automated AC; the human smoke sign-off is the one remaining runtime gate between the branch and the promise.
+- Files changed:
+  - `tests/recorder/smoke.md` (new)
+  - `scripts/ralph/CLAUDE.md`
+  - `scripts/ralph/prd.json` (R-015 passes=true; R-014 passes=true staged from prior iteration)
+  - `tests/recorder/test_e2e.py` (staged from prior iteration)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (298 tests, 4 skipped macOS-only).
+- **Learnings for future iterations:**
+  - The pre-promise guard lives in `scripts/ralph/CLAUDE.md` as a textual check against a literal `_____` placeholder — do NOT swap it for a YAML/front-matter sentinel later without also updating the guard text. The whole point is that the placeholder is visible in the rendered markdown so a human immediately sees what to fill in.
+  - Synthesizer/Runner branches will likely want their own analogous smoke.md + guard entry. Mirror this pattern rather than inventing a per-module gate shape: one markdown checklist per branch with a Sign-off section, one per-branch clause in the `Pre-promise guards` block of `scripts/ralph/CLAUDE.md`.
+  - The smoke checklist includes per-workflow minimums (event-count ranges, N clicks with AX targets, ≥1 text_input, ≥1 app_switch, ≥5 keyframes). These numbers are deliberately conservative — if a real recording consistently undershoots them, treat that as a signal the recorder missed events rather than a reason to lower the bar.
+  - `scripts/ralph/prd.json` now has every recorder story at `passes: true`. The branch's completion promise is gated exclusively on the human sign-off — do not add new stories here without bumping `R-015.priority` awareness, because the next automatable story would also block the promise indirectly.
+---

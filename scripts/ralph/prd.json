@@ -333,7 +333,7 @@
         "ruff check passes"
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": "The point of mocking the macOS pieces here is so this test runs in any environment — Ralph's sandbox, CI, whatever. Real macOS verification happens in the human smoke test (R-015)."
     },
     {
@@ -351,7 +351,7 @@
         "The Ralph loop MUST NOT output the completion promise until the smoke.md has the sign-off section filled in — Ralph should detect this and report 'awaiting human smoke test' instead"
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": "This is the story that prevents Ralph from declaring victory on pure unit-test pass. A real human has to run the workflows on a real Mac. The Ralph loop must refuse to output RECORDER_DONE if the sign-off is missing — implement this as a pre-promise check in the prompt.md / CLAUDE.md instructions."
     }
   ],
