@@ -538,7 +538,7 @@
         "pytest passes"
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": "This is the cross-module consistency check. Without it, a Ralph iteration on the Synthesizer could unknowingly produce a fixture skill referencing a trajectory_id that was deleted from fixtures/trajectories."
     },
     {

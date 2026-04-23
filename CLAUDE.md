@@ -183,6 +183,7 @@ uv run ruff check services/                   # lint
 uv run mypy --strict services/                # type check
 uv run pytest tests/<current-module>/         # module-specific tests
 ./scripts/check_fixtures.sh                   # golden SKILL fixtures (< 5 s)
+./scripts/check_contracts.sh                  # cross-module schemas + fixtures (< 10 s)
 
 # Frontend (only on feat/integration branch)
 pnpm --filter app typecheck
