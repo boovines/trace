@@ -37,6 +37,11 @@ Started: Wed Apr 22 15:33:38 EDT 2026
 - **RecordingSession owns `seq`**: `recorder.session.RecordingSession` is the single place where `seq` values are minted for a running trajectory. `TrajectoryWriter` still has its own auto-seq counter (belt-and-suspenders), but every normal emit path passes a pre-assigned seq under the session's `_lock`. Any future capture path that does NOT go through the session (e.g. an HTTP admin endpoint that injects events) must either acquire the same lock or accept interleaved seqs.
 - **Session dependency injection**: every macOS-dependent piece of `RecordingSession` is injected via a constructor kwarg (`event_tap_factory`, `focus_tracker_factory`, `text_aggregator_factory`, `permissions_check`, `ax_resolver`, `screenshot_capturer`, `display_info_provider`, `keyframe_policy`). Hermetic tests pass fakes; real use passes nothing and defaults fall back to the real modules. Keep this pattern for any future orchestrator — it is the only way tests can run in Ralph's sandbox without PyObjC.
 - **Dual-lock orchestrator pattern**: `_start_stop_lock` serialises `start()`/`stop()` bookkeeping; `_lock` guards per-event state (seq, writer.append_event, last-keyframe-time, pending timers). Do NOT collapse them — `stop()` spends non-trivial time joining threads and holding that on the per-event lock would starve capture callbacks. Capture-thread callbacks check `self._active` under `_lock` and bail if False, so late callbacks after `stop()` are silent no-ops.
+- **FastAPI `Depends` pattern**: bind `Depends(...)` once at module level (`StateDep = Depends(get_recorder_state)`) and reuse it as each endpoint's default — ruff `B008` rejects inline `Depends(...)`, but FastAPI inspects the default for the `Depends` instance regardless. This is the canonical workaround.
+- **Hermetic FastAPI testing**: drive the app via `httpx.AsyncClient(transport=ASGITransport(app=app))` (no real socket) and override dependencies via `app.dependency_overrides[get_recorder_state] = lambda: state`. Do NOT mutate module-level singletons in tests — they leak across tests because pytest-asyncio reuses the event loop.
+- **HTTP path traversal testing**: `httpx.AsyncClient` normalises `..`/`.`/empty path segments BEFORE the request reaches the ASGI app, so HTTP-level traversal tests are unreliable. Unit-test the path-safety helper (e.g. `_safe_screenshot_path`) directly with raw filename strings instead of through the HTTP layer.
+- **Storage root resolution**: `recorder.storage.default_trajectories_root()` resolves prod (`Trace`) vs dev (`Trace-dev`) profile via `TRACE_DEV_MODE=1`. Tests pin a `tmp_path` via `TRACE_PROFILE_DIR`. Any new module that needs to write to the per-user app data directory should reuse this helper rather than computing its own paths.
+- **PermissionsError forwarding**: `PermissionsMissingError.error` is the structured `PermissionsError` TypedDict — return it verbatim as the 403 body via `JSONResponse(status_code=403, content=dict(exc.error))`. Synthesizer/Runner endpoints that need similar structured-error responses should follow the same shape rather than re-inventing.
 
 ---
 
@@ -323,4 +328,47 @@ Started: Wed Apr 22 15:33:38 EDT 2026
   - `screenshot_ref` in events.jsonl uses the ZERO-PADDED seq (4 digits) — the schema pattern `^screenshots/\d{4,}\.png$` allows ≥4 digits so sessions >9999 events still validate. The session uses `f"screenshots/{seq:04d}.png"` which matches both the writer's `write_screenshot` padding and the schema pattern.
   - Dual-lock layout: a coarse `_start_stop_lock` for lifecycle + a fine `_lock` for per-event state. Do NOT fold them into one — `start()` and `stop()` spend non-trivial time stopping threads and joining; holding that time on the per-event lock would starve capture callbacks.
   - For the HTTP layer (R-011): `PermissionsMissingError.error` is a dict that already matches the expected 403 response body; forward it directly. `SessionAlreadyActiveError` → 409; `SessionNotActiveError` → 409.
+---
+
+## 2026-04-23 - R-011
+- Added `services/recorder/src/recorder/storage.py` exposing `default_trajectories_root()`, `ensure_trajectories_root()`, `trajectory_dir()`, `remove_trajectory()`. Resolves prod (`Trace`) vs dev (`Trace-dev`) profile via `TRACE_DEV_MODE=1`; tests pin a `tmp_path` via `TRACE_PROFILE_DIR`. Creates the root with perms `0700` (best-effort `chmod` swallows OSError on filesystems that don't support it).
+- Rewrote `services/recorder/src/recorder/api.py` from the scaffolding stub into the R-011 surface:
+  - `RecorderState` owns the on-disk root + the at-most-one `RecordingSession`. Single `threading.Lock` serialises start/stop/status/active_trajectory_id so two simultaneous `POST /recorder/start` calls cannot create two sessions.
+  - Two routers exported: `router` (mounted under `/recorder` by the gateway, owns `start`/`stop`/`status`) and `trajectories_router` (mounted at root, owns `GET/DELETE /trajectories[/{id}]` plus `GET /trajectories/{id}/screenshots/{filename}`).
+  - `POST /recorder/start` returns 200 `{trajectory_id}`, 409 on `SessionAlreadyActiveError`, **403 with the structured `PermissionsError` dict** on `PermissionsMissingError` (forwarded verbatim — the dict is already the body the UI expects).
+  - `POST /recorder/stop` returns 200 `{trajectory_id, event_count, duration_ms}` or 409.
+  - `GET /trajectories` filesystem-scans the root: skips dirs without metadata or with corrupt JSON (a future R-012 SQLite index will replace this scan); each item carries `id, label, started_at, stopped_at, duration_ms, event_count`.
+  - `GET /trajectories/{id}` returns full `metadata + events + screenshots` (screenshots are fully-qualified URLs built from `request.base_url`).
+  - `DELETE /trajectories/{id}`: 409 if it's the active recording, 404 if missing, 200 `{deleted}` on success.
+  - `GET /trajectories/{id}/screenshots/{filename}`: served via `FileResponse` instead of `StaticFiles` mount so Ralph doesn't need a long-lived directory at app startup. `_safe_screenshot_path` rejects `..`, `.`, empty, slashes, backslashes, and non-`.png` filenames + path-resolves against the trajectory dir to defeat any traversal that survives URL normalisation.
+- `Depends(get_recorder_state)` is bound once at module level as `StateDep` and reused as the default — keeps ruff `B008` happy without losing FastAPI DI semantics.
+- `gateway/main.py` includes both `recorder_router` (prefix `/recorder`) and `trajectories_router` (no prefix) so trajectory paths land at `/trajectories/...` per the PRD AC.
+- `tests/recorder/test_api.py` (33 tests): drives the FastAPI app via `httpx.AsyncClient` + `ASGITransport` (no real socket); `FakeSession` writes a real on-disk trajectory via `TrajectoryWriter` (so list/get/delete operate on real files) but never touches PyObjC. Coverage:
+  - `/recorder/status` idle / after-start / after-stop.
+  - `/recorder/start` happy / empty body / 409 already-recording / 403 permissions-missing with structured body.
+  - `/recorder/stop` summary / 409 not-recording.
+  - `/trajectories` empty / one-recording / skips dirs without metadata / direct unit test for malformed metadata.
+  - `/trajectories/{id}` full payload / 404.
+  - `DELETE /trajectories/{id}` happy / 404 / 409 active.
+  - `/trajectories/{id}/screenshots/{filename}` happy / 404 missing / 404 non-png suffix.
+  - Direct unit tests for `_safe_screenshot_path` covering `..`, `.`, empty, `..\\metadata.json`, etc. (URL normalisation by httpx swallows these before they reach the handler — the helper's safety still has to be locked in).
+  - `RecorderState` unit tests: creates root dir, idle status, start/stop round-trip, double-start raises, **8-thread concurrent start barrier yields exactly 1 success + 7 `SessionAlreadyActiveError`** (locks the locking).
+- Verified `uv run uvicorn gateway.main:app --host 127.0.0.1 --port <port>` boots cleanly and serves `/healthz`, `/recorder/status`, `/trajectories`.
+- Files changed:
+  - `services/recorder/src/recorder/storage.py` (new)
+  - `services/recorder/src/recorder/api.py` (rewritten)
+  - `gateway/main.py` (mount second router)
+  - `tests/recorder/test_api.py` (new)
+  - `scripts/ralph/prd.json` (R-011 passes=true)
+  - `scripts/ralph/progress.txt` (this entry + Codebase Patterns updates)
+- Quality gates: `uv run ruff check services/recorder tests/recorder gateway`, `uv run mypy --strict services/recorder gateway`, `uv run pytest tests/recorder/` — all pass (241 passed, 4 skipped — the opt-in macOS tests for event_tap/ax_resolver/focus_tracker/screenshot).
+- **Learnings for future iterations:**
+  - For FastAPI dependencies, **bind `Depends(...)` to a module-level constant** (`StateDep = Depends(get_recorder_state)`) and reuse it as each endpoint's default. ruff `B008` rejects `Depends(...)` written inline in the signature, but FastAPI inspects the default for a `Depends` instance regardless — this is the canonical workaround.
+  - `app.dependency_overrides[get_recorder_state] = lambda: state` is the correct test seam — do NOT mutate the module-level `_STATE` global in tests because pytest-asyncio reruns dependencies on every request and global mutation leaks across tests.
+  - When `httpx.AsyncClient` sees `..` or `.` segments in a URL path, it normalises them BEFORE the request reaches the ASGI app. So HTTP-level "path traversal" tests are flaky/useless — instead unit-test the `_safe_screenshot_path` helper directly with raw filename strings. This pattern will recur for any future endpoint that takes a filename in the path.
+  - `TrajectoryWriter.close()` rewrites `stopped_at` to `now`. If a hermetic test wants deterministic `started_at`/`stopped_at` (e.g., to assert on `duration_ms`), call `close()` FIRST and then overwrite `metadata.json` with deterministic timestamps. Writing-then-closing-then-asserting is brittle.
+  - `RecorderState` exists as a separate object (NOT a singleton hard-coded into the router) precisely so tests can inject a `tmp_path`-rooted state per test. Future stories that need access to the state from outside the HTTP layer (e.g., R-012 index reconciliation at startup) should resolve it via `get_recorder_state()`, not import the module-level `_STATE`.
+  - The session-already-active check is at the `RecorderState` layer (with the lock), not at the router. The router's only job is to translate `SessionAlreadyActiveError`/`SessionNotActiveError`/`PermissionsMissingError` into 409/409/403 — keep this split when adding new endpoints (e.g. /recorder/abort), so the lock guarantees aren't bypassable from a different route.
+  - `PermissionsMissingError.error` is a plain dict (`PermissionsError` TypedDict) and is returned directly as the 403 body via `JSONResponse(status_code=403, content=dict(exc.error))`. Future modules (Synthesizer, Runner) that need similar structured-error responses should follow the same shape rather than re-inventing.
+  - Static screenshot serving uses `FileResponse` (per-request) instead of `StaticFiles` mount. This avoids requiring the trajectories directory to exist at app startup AND lets us enforce the path-safety check (`_safe_screenshot_path`) per request. If the asset volume ever justifies switching to `StaticFiles`, keep the safety check by mounting the dir at a different path and proxying through the safe handler.
 ---

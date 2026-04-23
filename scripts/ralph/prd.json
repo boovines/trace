@@ -269,7 +269,7 @@
         "pytest passes"
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": "The gateway will later also mount /synthesize and /run — keep gateway/main.py structured so other modules can add their routers without touching recorder code. Bind to 127.0.0.1 ONLY — never 0.0.0.0 — this service must not be network-reachable."
     },
     {
