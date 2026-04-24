@@ -379,6 +379,18 @@ class EventTap:
         self._deliver(payload)
 
     def _reenable(self, reason: str) -> None:
+        # When ``stop()`` calls ``CGEventTapEnable(False)`` the kernel posts a
+        # synthetic ``kCGEventTapDisabledBy*`` event back through the tap
+        # callback. That isn't a real "macOS suspended our tap" — it's the
+        # disable we just requested, echoed. Don't log a scary WARNING for
+        # it, and don't bother re-enabling a tap that's about to be
+        # destroyed; the trajectory-level ``tap_reenabled`` event would also
+        # be dropped by ``_deliver``'s ``_stopping`` guard anyway.
+        if self._stopping:
+            logger.debug(
+                "Ignoring tap-disabled echo from our own stop() (%s)", reason
+            )
+            return
         logger.warning("CGEventTap disabled (%s); re-enabling", reason)
         if self._tap is not None:
             try:

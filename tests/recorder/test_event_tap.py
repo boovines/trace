@@ -233,6 +233,35 @@ def test_handle_cg_event_suppressed_while_stopping(
     assert received == []
 
 
+def test_tap_disabled_during_stop_is_silent(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``CGEventTapEnable(False)`` triggers an echo ``kCGEventTapDisabled*``
+    event back through the callback. While we're stopping, that's our own
+    teardown speaking — no warning, no re-enable attempt, no synthetic
+    ``tap_reenabled`` delivery (which would be dropped anyway)."""
+    quartz = _install_stub_quartz(monkeypatch)
+    enable_calls: list[tuple[Any, bool]] = []
+    quartz.CGEventTapEnable = (  # type: ignore[attr-defined]
+        lambda tap_arg, on: enable_calls.append((tap_arg, on))
+    )
+    received: list[dict[str, Any]] = []
+    tap = EventTap(callback=received.append)
+    tap._tap = object()
+    tap._stopping = True
+
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="recorder.event_tap"):
+        tap.handle_cg_event(-1, object())  # kCGEventTapDisabledByUserInput
+
+    assert received == []
+    assert enable_calls == []
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert not any("CGEventTap disabled" in r.getMessage() for r in warnings)
+
+
 def test_callback_exception_does_not_propagate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
