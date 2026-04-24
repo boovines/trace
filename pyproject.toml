@@ -11,44 +11,67 @@ dependencies = [
     "pydantic>=2.8",
     "anthropic>=0.40",
     "jsonschema>=4.23",
+    # Server-Sent Events transport for the synthesizer's question-and-answer
+    # endpoints — see services/synthesizer/synthesizer/api.py.
+    "sse-starlette>=2.1",
+    "trace-recorder",
+    "trace-synthesizer",
+    "trace-runner",
 ]
 
 [project.optional-dependencies]
-macos = [
-    "pyobjc-framework-Cocoa>=10.3",
-    "pyobjc-framework-Quartz>=10.3",
-    "pyobjc-framework-ApplicationServices>=10.3",
-]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
-    "respx>=0.21",
     "mypy>=1.11",
     "ruff>=0.6",
-    "pillow>=10.4",
     "types-jsonschema>=4.23",
+    # respx mocks httpx clients (used to stub the Anthropic SDK in runner & synth tests).
+    "respx>=0.21",
+    # pillow round-trips preview PNGs in snapshot/golden-fixture tests.
+    "pillow>=10.4",
 ]
 
 [tool.uv.workspace]
 members = ["services/recorder", "services/synthesizer", "services/runner"]
 
+[tool.uv.sources]
+trace-recorder = { workspace = true }
+trace-synthesizer = { workspace = true }
+trace-runner = { workspace = true }
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = [".venv", "build", "dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["recorder", "synthesizer", "runner", "gateway"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
-files = ["services/runner/src", "gateway"]
-mypy_path = "services/runner/src:services/synthesizer"
+files = ["services", "gateway"]
+# All three module branches use a src/ layout for their packages, except
+# the synthesizer in this branch which is still a flat layout (services/synthesizer/synthesizer).
+# mypy_path lets type-checks resolve `recorder`, `runner`, and `synthesizer`.
+mypy_path = "services/recorder/src:services/runner/src:services/synthesizer"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
-module = ["Cocoa.*", "Quartz.*", "ApplicationServices.*", "AppKit.*", "respx.*"]
+module = [
+    "Cocoa.*",
+    "Quartz.*",
+    "ApplicationServices.*",
+    "AppKit.*",
+    "Foundation.*",
+    "objc.*",
+    "respx.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
@@ -56,6 +79,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["services/runner/src", "services/synthesizer"]
 markers = [
-    "macos: test requires a real macOS main display (skipped in CI and Ralph iterations)",
-    "live_input: test posts real events via CGEventPost; skipped unless --run-live-input is passed",
+    "macos: integration tests that require a real macOS host with Accessibility/Input Monitoring permissions granted; skipped by default off-darwin or without permissions.",
+    "uses_lsappinfo: tests that exercise the ``lsappinfo`` frontmost-app helper directly and opt out of the module-level stub that otherwise forces it to return None.",
+    "live_input: test posts real events via CGEventPost; skipped unless --run-live-input is passed.",
 ]

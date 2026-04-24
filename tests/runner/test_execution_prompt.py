@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from runner.execution_prompt import (
     COMPLETION_PROTOCOL,
     DESTRUCTIVE_PROTOCOL,

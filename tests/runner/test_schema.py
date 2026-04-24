@@ -18,6 +18,7 @@ from typing import Any
 import jsonschema
 import pytest
 from pydantic import ValidationError
+
 from runner.schema import (
     TERMINAL_STATUSES,
     WAITING_STATUS,

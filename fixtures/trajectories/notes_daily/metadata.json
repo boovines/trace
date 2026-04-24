@@ -1,0 +1,25 @@
+{
+  "id": "55555555-5555-4555-8555-555555555555",
+  "label": "Create today's daily note from template",
+  "started_at": "2026-04-01T14:00:00.000+00:00",
+  "stopped_at": "2026-04-01T14:01:30.000+00:00",
+  "display_info": {
+    "width": 1440,
+    "height": 900,
+    "scale_factor": 2.0
+  },
+  "app_focus_history": [
+    {
+      "bundle_id": "com.apple.Safari",
+      "name": "Safari",
+      "entered_at": "2026-04-01T14:00:00.000+00:00",
+      "exited_at": "2026-04-01T14:00:01.000+00:00"
+    },
+    {
+      "bundle_id": "com.apple.Notes",
+      "name": "Notes",
+      "entered_at": "2026-04-01T14:00:01.000+00:00",
+      "exited_at": "2026-04-01T14:01:30.000+00:00"
+    }
+  ]
+}

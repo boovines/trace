@@ -13,6 +13,7 @@ import sys
 
 import pytest
 from PIL import Image
+
 from runner.coords import (
     DisplayInfo,
     DryRunDisplayInfo,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
 from runner.agent_runtime import AgentResponse
 from runner.parser import (
     ConfirmationRequest,

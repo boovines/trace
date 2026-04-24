@@ -19,9 +19,8 @@ from __future__ import annotations
 
 from typing import Final, Literal
 
-from synthesizer.skill_doc import ParsedSkill, SkillStep
-
 from runner.skill_loader import LoadedSkill
+from synthesizer.skill_doc import ParsedSkill, SkillStep
 
 Mode = Literal["dry_run", "live"]
 

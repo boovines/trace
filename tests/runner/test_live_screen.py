@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
+
 from runner import live_screen as live_screen_module
 from runner.coords import DisplayInfo, ImageMapping
 from runner.live_screen import (

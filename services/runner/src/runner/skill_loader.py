@@ -31,6 +31,7 @@ from typing import Any, Final
 
 from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as JSONSchemaValidationError
+
 from synthesizer.schema import SkillMetaMismatchError, validate_meta_against_markdown
 from synthesizer.skill_doc import (
     ParsedSkill,

@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 
 import pytest
+
 from runner.coords import ImageMapping
 from runner.dispatcher import (
     MAX_WAIT_SECONDS,

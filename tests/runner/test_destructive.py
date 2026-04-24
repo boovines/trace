@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
 from runner.destructive import load_destructive_keywords, matches_destructive_keyword
 
 EXPECTED_KEYWORDS = frozenset(

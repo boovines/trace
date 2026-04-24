@@ -7,6 +7,7 @@ drive deterministic timelines without monkeypatching the ``time`` module.
 from __future__ import annotations
 
 import pytest
+
 from runner.budget import (
     DEFAULT_MAX_ACTIONS_PER_MINUTE,
     DEFAULT_MAX_INPUT_TOKENS,

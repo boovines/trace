@@ -22,6 +22,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+
 from runner import live_input as live_input_module
 from runner.coords import DisplayInfo
 from runner.input_adapter import InputAdapter

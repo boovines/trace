@@ -1,0 +1,25 @@
+{
+  "id": "22222222-2222-4222-8222-222222222222",
+  "label": "Create 30-minute focus block tomorrow at 2pm",
+  "started_at": "2026-04-01T11:00:00.000+00:00",
+  "stopped_at": "2026-04-01T11:02:00.000+00:00",
+  "display_info": {
+    "width": 1440,
+    "height": 900,
+    "scale_factor": 2.0
+  },
+  "app_focus_history": [
+    {
+      "bundle_id": "com.apple.finder",
+      "name": "Finder",
+      "entered_at": "2026-04-01T11:00:00.000+00:00",
+      "exited_at": "2026-04-01T11:00:02.000+00:00"
+    },
+    {
+      "bundle_id": "com.google.Chrome",
+      "name": "Google Chrome",
+      "entered_at": "2026-04-01T11:00:02.000+00:00",
+      "exited_at": "2026-04-01T11:02:00.000+00:00"
+    }
+  ]
+}

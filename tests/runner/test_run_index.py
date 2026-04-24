@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+
 from runner.run_index import INCOMPLETE_ON_RESTART_REASON, RunIndex
 from runner.run_writer import RunWriter
 from runner.schema import RunMetadata

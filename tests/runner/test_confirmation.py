@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 import pytest
+
 from runner.confirmation import (
     ConfirmationDecision,
     ConfirmationQueue,

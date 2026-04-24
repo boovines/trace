@@ -7,6 +7,7 @@ downstream safety assumption breaks, so each behavior is pinned here.
 from __future__ import annotations
 
 import pytest
+
 from runner.safety import (
     LIVE_MODE_ENV_VAR,
     LiveModeNotAllowed,

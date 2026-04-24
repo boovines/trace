@@ -24,6 +24,7 @@ from typing import Any
 from unittest import mock
 
 import pytest
+
 from runner.run_writer import RunWriter, get_run_dir_perms
 from runner.schema import RunMetadata
 
