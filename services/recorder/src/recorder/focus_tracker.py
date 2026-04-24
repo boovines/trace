@@ -96,9 +96,17 @@ class FocusTracker:
         self._window_focus_callbacks: list[WindowFocusCallback] = []
         self._history: list[AppFocusHistoryEntry] = []
         self._observer_handle: Any = None
+        self._observer_queue: Any = None
         self._started: bool = False
+        self._poll_stop: threading.Event = threading.Event()
+        self._poll_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------- lifecycle
+
+    #: Polling interval (seconds). The NSWorkspace notification path is
+    #: unreliable in a bare Python process (no NSRunLoop pump), so we also
+    #: poll ``frontmostApplication`` as a belt-and-suspenders fallback.
+    POLL_INTERVAL_SECONDS: float = 0.25
 
     def start(self) -> None:
         """Subscribe to NSWorkspace notifications and seed current state.
@@ -114,15 +122,45 @@ class FocusTracker:
         if current is not None:
             self._transition_to(current)
 
+        # Polling fallback: notifications from NSWorkspace rely on an
+        # NSRunLoop pump that a bare Python/uvicorn process doesn't drive,
+        # so the observer block may never fire in practice. A lightweight
+        # poll thread guarantees we still detect Cmd-Tab and other focus
+        # changes. _transition_to is idempotent on no-change so this
+        # introduces no duplicate events.
+        self._poll_stop.clear()
+        thread = threading.Thread(
+            target=self._poll_loop,
+            name="recorder-focus-poll",
+            daemon=True,
+        )
+        thread.start()
+        self._poll_thread = thread
+
     def stop(self) -> None:
         """Unsubscribe and finalise the last history entry. Idempotent."""
         if not self._started:
             return
         self._started = False
+        self._poll_stop.set()
+        poll_thread = self._poll_thread
+        self._poll_thread = None
+        if poll_thread is not None and poll_thread.is_alive():
+            poll_thread.join(timeout=1.0)
         self._unsubscribe_workspace()
         with self._lock:
             if self._history and self._history[-1].get("exited_at") is None:
                 self._history[-1]["exited_at"] = _now_iso()
+
+    def _poll_loop(self) -> None:
+        while not self._poll_stop.is_set():
+            try:
+                current = self._query_frontmost_app()
+                if current is not None:
+                    self._transition_to(current)
+            except Exception:
+                logger.exception("FocusTracker poll iteration raised")
+            self._poll_stop.wait(self.POLL_INTERVAL_SECONDS)
 
     # -------------------------------------------------------- callback hooks
 
@@ -270,19 +308,33 @@ class FocusTracker:
     def _subscribe_workspace(self) -> None:
         try:
             from AppKit import NSWorkspace
+            from Foundation import NSOperationQueue
         except ImportError:
-            logger.warning("AppKit unavailable; focus tracking disabled")
+            logger.warning("AppKit/Foundation unavailable; focus tracking disabled")
             return
         try:
             center = NSWorkspace.sharedWorkspace().notificationCenter()
         except Exception:
             logger.exception("NSWorkspace.notificationCenter() raised")
             return
+        # IMPORTANT: pass a dedicated NSOperationQueue, not ``None``. When the
+        # queue is ``None`` the notification is posted synchronously on the
+        # thread that posts it — for NSWorkspace that's the main thread, whose
+        # NSRunLoop is never pumped in a bare Python/uvicorn process. The block
+        # would then never fire, so every subsequent app switch would be lost
+        # (the initial frontmost-app seed via ``_query_frontmost_app`` would be
+        # the only app ever recorded). Handing off to a dedicated queue
+        # decouples delivery from any runloop.
+        try:
+            queue = NSOperationQueue.alloc().init()
+        except Exception:
+            logger.exception("NSOperationQueue alloc/init raised")
+            queue = None
         try:
             handle = center.addObserverForName_object_queue_usingBlock_(
                 APP_ACTIVATED_NOTIFICATION,
                 None,
-                None,
+                queue,
                 self._ns_workspace_block,
             )
         except Exception:
@@ -291,6 +343,7 @@ class FocusTracker:
             )
             return
         self._observer_handle = handle
+        self._observer_queue = queue
 
     def _unsubscribe_workspace(self) -> None:
         if self._observer_handle is None:

@@ -270,9 +270,29 @@ class TextAggregator:
             # A new keystroke could have slipped in between the Timer firing
             # and the lock being acquired; the timer reference would then
             # have been replaced.  Ignore stale firings.
-            if self._stopped:
+            if self._stopped or self._current is None:
                 return
-            self._flush_locked()
+            # Idle flush: emit the buffered text but *preserve* the focus
+            # context so continuous typing in the same app/field re-buffers
+            # straight into a fresh buffer. Without this, the first idle
+            # timeout permanently turns the aggregator deaf until an
+            # app_switch fires — which, on a platform where NSWorkspace
+            # notifications may not pump reliably, means all subsequent
+            # typing is silently lost.
+            current = self._current
+            text = "".join(current.buffer)
+            self._cancel_timer_locked()
+            if text:
+                payload: TextInputEvent = {
+                    "app_bundle_id": current.app_bundle_id,
+                    "text": text,
+                    "field_label": current.field_label,
+                }
+                try:
+                    self._emit(payload)
+                except Exception:
+                    logger.exception("TextAggregator emit callback raised")
+            current.buffer.clear()
 
 
 # ---------------------------------------------------------------- AX helper

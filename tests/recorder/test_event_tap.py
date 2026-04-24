@@ -303,6 +303,7 @@ def _install_runloop_stub_quartz(monkeypatch: pytest.MonkeyPatch) -> types.Modul
     stub.CFRunLoopRun = CFRunLoopRun  # type: ignore[attr-defined]
     stub.CFRunLoopStop = CFRunLoopStop  # type: ignore[attr-defined]
     stub.kCGHIDEventTap = 0  # type: ignore[attr-defined]
+    stub.kCGSessionEventTap = 1  # type: ignore[attr-defined]
     stub.kCGHeadInsertEventTap = 0  # type: ignore[attr-defined]
     stub.kCGEventTapOptionListenOnly = 1  # type: ignore[attr-defined]
     stub.kCFRunLoopCommonModes = object()  # type: ignore[attr-defined]

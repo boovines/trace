@@ -122,6 +122,25 @@ def _normalise_event(cg_event_type: int, event: Any, quartz: Any) -> dict[str, A
             key_code = None
         payload["key_code"] = key_code
 
+        # Translate keycode → unicode string the keystroke would insert, so
+        # ``text_aggregator.handle_key_event`` can buffer it.  Empty for
+        # non-printing keys (arrows, function keys, etc.) — aggregator
+        # ignores those silently.  Only meaningful for key_down (10); up
+        # and flags_changed events don't carry typed text.
+        chars: str | None = None
+        if cg_event_type == 10:
+            try:
+                _, result = quartz.CGEventKeyboardGetUnicodeString(
+                    event, 4, None, None
+                )
+                if isinstance(result, str):
+                    chars = result
+            except Exception:
+                logger.debug(
+                    "CGEventKeyboardGetUnicodeString failed", exc_info=True
+                )
+        payload["chars"] = chars
+
     # Scroll events carry per-axis deltas.
     if cg_event_type == 22:
         try:
@@ -268,7 +287,12 @@ class EventTap:
 
         try:
             tap = Quartz.CGEventTapCreate(
-                Quartz.kCGHIDEventTap,
+                # kCGSessionEventTap, not kCGHIDEventTap: HID-layer taps only
+                # see system hotkeys for unprivileged processes (Cmd+Tab,
+                # Cmd+Space, …); plain typing flows direct to the focused
+                # app. Session-layer taps see every user keystroke provided
+                # Accessibility + Input Monitoring are granted.
+                Quartz.kCGSessionEventTap,
                 Quartz.kCGHeadInsertEventTap,
                 Quartz.kCGEventTapOptionListenOnly,
                 _event_mask_for_recorder(),

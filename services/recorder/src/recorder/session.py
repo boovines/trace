@@ -330,15 +330,30 @@ class RecordingSession:
                 self._last_keyframe_monotonic = time.monotonic()
                 self._pending_timers = []
 
+            # IMPORTANT: publish ``_text_aggregator`` and flip ``_active`` BEFORE
+            # ``focus_tracker.start()``. ``start()`` synchronously fires the
+            # initial app_switch callback (which seeds focus from
+            # ``NSWorkspace.frontmostApplication()``). That callback goes through
+            # ``_on_app_switch``, which (1) short-circuits on ``if not
+            # self._active`` and (2) reads ``self._text_aggregator`` to call
+            # ``set_focus`` on it. If either is still unset, the aggregator
+            # never gets a focused field and every subsequent plain keystroke is
+            # silently dropped for the lifetime of the session.
+            self._text_aggregator = text_aggregator
+            self._active = True
             try:
                 focus_tracker.start()
             except Exception:
+                self._active = False
+                self._text_aggregator = None
                 writer.close()
                 self._writer = None
                 raise
             try:
                 event_tap.start()
             except Exception:
+                self._active = False
+                self._text_aggregator = None
                 with self._lock:
                     self._writer = None
                 try:
@@ -350,7 +365,6 @@ class RecordingSession:
 
             self._focus_tracker = focus_tracker
             self._event_tap = event_tap
-            self._text_aggregator = text_aggregator
 
             self._stop_event.clear()
             self._started_monotonic = time.monotonic()
@@ -362,7 +376,6 @@ class RecordingSession:
             keyframe_thread.start()
             self._keyframe_thread = keyframe_thread
 
-            self._active = True
             return writer.id
 
     def stop(self) -> SessionSummary:
