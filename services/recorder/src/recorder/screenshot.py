@@ -27,6 +27,7 @@ import logging
 from typing import Any, TypedDict
 
 __all__ = [
+    "KEYFRAME_DOWNSCALE",
     "DisplayInfo",
     "capture_main_display",
     "get_main_display_info",
@@ -40,6 +41,17 @@ _NS_BITMAP_FILE_TYPE_PNG: int = 4
 
 # PNG magic bytes; exposed for callers that want to sanity-check bytes.
 PNG_MAGIC: bytes = b"\x89PNG\r\n\x1a\n"
+
+# Keyframes are downscaled to roughly 1x (from the Retina 2x native
+# CGWindowListCreateImage output) before PNG encoding. On a 1512x982 Retina
+# main display the native image is 3024x1964 → ~2 MB PNG each; after 0.5x
+# downscale it is 1512x982 → ~400 KB, comfortably inside the
+# ``smoke.md`` budget of 30 MB / 3 min recording.
+#
+# 0.5 is tuned for "UI still readable, text legible, much smaller". Set
+# to 1.0 to disable downscaling (handy when a story's AC specifically needs
+# pixel-accurate keyframes).
+KEYFRAME_DOWNSCALE: float = 0.5
 
 
 class DisplayInfo(TypedDict):
@@ -79,6 +91,14 @@ def capture_main_display() -> bytes | None:
     cg_image = _create_main_display_image(Quartz)
     if cg_image is None:
         return None
+
+    if KEYFRAME_DOWNSCALE != 1.0:
+        downscaled = _downscale_cg_image(cg_image, Quartz, KEYFRAME_DOWNSCALE)
+        if downscaled is not None:
+            cg_image = downscaled
+        # If downscaling fails we fall through with the original image rather
+        # than emit nothing — storage budget is a soft target, but a missing
+        # keyframe is a hard gap.
 
     return _cg_image_to_png_bytes(cg_image, NSBitmapImageRep)
 
@@ -153,6 +173,69 @@ def _create_main_display_image(quartz: Any) -> Any | None:
         )
         return None
     return cg_image
+
+
+def _downscale_cg_image(cg_image: Any, quartz: Any, scale: float) -> Any | None:
+    """Return a downscaled CGImage (same framework, smaller bitmap).
+
+    Creates a device-RGBA bitmap context at ``scale * original`` resolution,
+    draws the original image into it, and returns the new CGImage. Keeps
+    alpha so transparent overlays (mouse cursor shadows etc.) survive.
+    Returns ``None`` and logs a warning if any step fails — callers should
+    fall back to the original image.
+    """
+    if scale <= 0 or scale > 1:
+        logger.debug(
+            "KEYFRAME_DOWNSCALE %s outside (0,1]; skipping downscale", scale
+        )
+        return None
+
+    try:
+        width = int(quartz.CGImageGetWidth(cg_image) * scale)
+        height = int(quartz.CGImageGetHeight(cg_image) * scale)
+    except Exception:
+        logger.exception("CGImageGet{Width,Height} raised")
+        return None
+    if width <= 0 or height <= 0:
+        return None
+
+    try:
+        color_space = quartz.CGColorSpaceCreateDeviceRGB()
+    except Exception:
+        logger.exception("CGColorSpaceCreateDeviceRGB raised")
+        return None
+    if color_space is None:
+        return None
+
+    try:
+        # 8 bpc, 0 bytes per row (let CG pick), premultiplied-alpha RGBA.
+        context = quartz.CGBitmapContextCreate(
+            None,
+            width,
+            height,
+            8,
+            0,
+            color_space,
+            quartz.kCGImageAlphaPremultipliedLast,
+        )
+    except Exception:
+        logger.exception("CGBitmapContextCreate raised")
+        return None
+    if context is None:
+        return None
+
+    try:
+        rect = quartz.CGRectMake(0.0, 0.0, float(width), float(height))
+        quartz.CGContextDrawImage(context, rect, cg_image)
+    except Exception:
+        logger.exception("CGContextDrawImage raised during downscale")
+        return None
+
+    try:
+        return quartz.CGBitmapContextCreateImage(context)
+    except Exception:
+        logger.exception("CGBitmapContextCreateImage raised")
+        return None
 
 
 def _cg_image_to_png_bytes(cg_image: Any, bitmap_cls: Any) -> bytes | None:
