@@ -35,6 +35,28 @@ from recorder.focus_tracker import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _disable_lsappinfo_probe(
+    monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
+) -> None:
+    """Force the lsappinfo frontmost probe to return None in every test.
+
+    Real hosts have ``lsappinfo`` installed and it shells out to return the
+    actual frontmost app, bypassing the hermetic AppKit/ApplicationServices
+    stubs each test installs. Stubbing it out at the module level keeps the
+    tests pinned to the NSWorkspace fallback path they were written for.
+
+    Tests marked ``@pytest.mark.uses_lsappinfo`` (the ones that exercise
+    the helper itself) opt out and install their own subprocess stubs.
+    """
+    if request.node.get_closest_marker("uses_lsappinfo"):
+        return
+    monkeypatch.setattr(
+        "recorder.focus_tracker._query_frontmost_via_lsappinfo",
+        lambda: None,
+    )
+
+
 class _FakeRunningApp:
     def __init__(self, bundle_id: str, name: str, pid: int) -> None:
         self._bundle_id = bundle_id
@@ -598,3 +620,94 @@ def test_macos_real_app_switch_fires_callback() -> None:  # pragma: no cover
     finally:
         tracker.stop()
     assert switches, "expected at least one app-switch callback"
+
+
+# ---------------------------------------------------------------------------
+# lsappinfo helper
+# ---------------------------------------------------------------------------
+
+
+def _make_run_result(stdout: str, returncode: int = 0) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr="")
+
+
+@pytest.mark.uses_lsappinfo
+def test_lsappinfo_parses_three_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    from recorder.focus_tracker import _query_frontmost_via_lsappinfo
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/lsappinfo")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(cmd)
+        if cmd[:2] == ["lsappinfo", "front"]:
+            return _make_run_result("ASN:0x0-0x123456:\n")
+        return _make_run_result(
+            '"pid"=4242\n'
+            '"CFBundleIdentifier"="com.apple.TextEdit"\n'
+            '"LSDisplayName"="TextEdit"\n'
+        )
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    result = _query_frontmost_via_lsappinfo()
+    assert result == {"bundle_id": "com.apple.TextEdit", "name": "TextEdit", "pid": 4242}
+    # Second call asn should be the exact ASN from the first call's stdout.
+    assert calls[1][-1] == "ASN:0x0-0x123456"
+
+
+@pytest.mark.uses_lsappinfo
+def test_lsappinfo_missing_binary_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from recorder.focus_tracker import _query_frontmost_via_lsappinfo
+
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+    # subprocess.run should never be called; make it blow up if it is.
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not run")),
+    )
+    assert _query_frontmost_via_lsappinfo() is None
+
+
+@pytest.mark.uses_lsappinfo
+def test_lsappinfo_timeout_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from recorder.focus_tracker import _query_frontmost_via_lsappinfo
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/lsappinfo")
+
+    def raise_timeout(*_: Any, **__: Any) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd="lsappinfo", timeout=1.0)
+
+    monkeypatch.setattr("subprocess.run", raise_timeout)
+    assert _query_frontmost_via_lsappinfo() is None
+
+
+@pytest.mark.uses_lsappinfo
+def test_lsappinfo_info_nonzero_returncode_returns_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from recorder.focus_tracker import _query_frontmost_via_lsappinfo
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/lsappinfo")
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["lsappinfo", "front"]:
+            return _make_run_result("ASN:0x0-0x1:\n")
+        return _make_run_result("", returncode=1)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _query_frontmost_via_lsappinfo() is None
+
+
+@pytest.mark.uses_lsappinfo
+def test_lsappinfo_partial_fields_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from recorder.focus_tracker import _query_frontmost_via_lsappinfo
+
+    monkeypatch.setattr("shutil.which", lambda _name: "/usr/bin/lsappinfo")
+
+    def fake_run(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
+        if cmd[:2] == ["lsappinfo", "front"]:
+            return _make_run_result("ASN:0x0-0x1:\n")
+        return _make_run_result('"pid"=42\n"CFBundleIdentifier"=""\n"LSDisplayName"="X"\n')
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert _query_frontmost_via_lsappinfo() is None

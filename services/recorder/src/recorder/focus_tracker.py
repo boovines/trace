@@ -375,6 +375,23 @@ class FocusTracker:
     # ---------------------------------------------------- AX / NSWorkspace ops
 
     def _query_frontmost_app(self) -> AppInfo | None:
+        # Prefer ``lsappinfo`` over ``NSWorkspace.frontmostApplication()``.
+        # NSWorkspace caches its "who is frontmost" answer and only updates
+        # when notifications pump through an NSRunLoop — our bare
+        # Python/uvicorn process has no such pump, so NSWorkspace returns
+        # whatever app was frontmost at the instant of first query, for the
+        # entire session. ``lsappinfo`` shells out to a fresh OS-native
+        # process each call and queries LaunchServices directly, so it
+        # always reports the true current frontmost app. This is the
+        # functional replacement for the NSWorkspace notification stream
+        # that we can't reliably receive.
+        ls_result = _query_frontmost_via_lsappinfo()
+        if ls_result is not None:
+            return ls_result
+
+        # Fallback: NSWorkspace. Kept so unit tests that stub AppKit keep
+        # working, and in case lsappinfo ever disappears from a future
+        # macOS. In practice it returns stale data in this environment.
         try:
             from AppKit import NSWorkspace
         except ImportError:
@@ -441,6 +458,78 @@ class FocusTracker:
 def _now_iso() -> str:
     """ISO-8601 timestamp with millisecond precision, compatible with the schema."""
     return datetime.now(UTC).isoformat(timespec="milliseconds")
+
+
+def _parse_lsappinfo_fields(text: str) -> dict[str, str]:
+    """Parse ``"key"="value"`` lines from ``lsappinfo info`` output."""
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().strip('"')
+        value = value.strip().strip('"')
+        fields[key] = value
+    return fields
+
+
+def _query_frontmost_via_lsappinfo() -> AppInfo | None:
+    """Query the current frontmost app via Darwin's ``lsappinfo`` utility.
+
+    ``lsappinfo front`` returns an Application Serial Number (ASN); a follow-
+    up ``lsappinfo info`` call expands it into bundle id / name / pid.
+    Each invocation shells out to a fresh OS-native process that queries
+    LaunchServices directly, which is the authoritative source of "who is
+    frontmost" — and updates live, unlike NSWorkspace in a detached Python
+    process. Returns ``None`` if the utility is missing or any call fails.
+    """
+    import shutil  # local import — keeps module-level imports clean
+    import subprocess
+
+    if shutil.which("lsappinfo") is None:
+        return None
+    try:
+        asn_result = subprocess.run(
+            ["lsappinfo", "front"],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.debug("lsappinfo front invocation raised", exc_info=True)
+        return None
+    if asn_result.returncode != 0:
+        return None
+    asn = asn_result.stdout.strip().rstrip(":")
+    if not asn:
+        return None
+    try:
+        info_result = subprocess.run(
+            ["lsappinfo", "info", "-only", "pid",
+             "-only", "bundleID", "-only", "name", asn],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        logger.debug("lsappinfo info invocation raised", exc_info=True)
+        return None
+    if info_result.returncode != 0:
+        return None
+    fields = _parse_lsappinfo_fields(info_result.stdout)
+    bundle_id = fields.get("CFBundleIdentifier") or ""
+    name = fields.get("LSDisplayName") or ""
+    pid_raw = fields.get("pid") or ""
+    if not bundle_id or not name or not pid_raw:
+        return None
+    try:
+        pid = int(pid_raw)
+    except ValueError:
+        return None
+    return AppInfo(bundle_id=bundle_id, name=name, pid=pid)
 
 
 def _extract_app_info(notification: Any) -> AppInfo | None:

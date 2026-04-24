@@ -63,4 +63,5 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "macos: integration tests that require a real macOS host with Accessibility/Input Monitoring permissions granted; skipped by default off-darwin or without permissions.",
+    "uses_lsappinfo: tests that exercise the ``lsappinfo`` frontmost-app helper directly and opt out of the module-level stub that otherwise forces it to return None.",
 ]
