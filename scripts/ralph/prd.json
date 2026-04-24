@@ -1,0 +1,421 @@
+{
+  "project": "Trace",
+  "branchName": "feat/recorder",
+  "description": "Trace Module 1 — Recorder. Captures macOS user actions (clicks, keystrokes, scrolls, app switches, text input) into a structured trajectory directory that downstream modules (Synthesizer, Runner) consume. Runs as a Python 3.11 FastAPI service on 127.0.0.1:8765 under the /recorder prefix. Uses PyObjC for macOS Accessibility APIs (AXUIElement), Quartz CGEventTap for global event capture, and CGWindowListCreateImage for screenshots. Captures are dual-source: semantic (accessibility tree for clicks/targets) and visual (keyframe screenshots every 5s and on app switches). Text input is aggregated per-field (not per-keystroke) for both usefulness and storage sanity. Events are 1-indexed sequentially, written to events.jsonl as they happen. Output goes to ~/Library/Application Support/Trace/trajectories/<uuid>/ (prod) or Trace-dev/ (Ralph iterations). macOS permissions (Accessibility, Screen Recording, Input Monitoring) required — module detects missing permissions and returns structured errors to the UI. Does NOT interpret the workflow, call any LLM, or write skill files — this is pure capture.",
+  "techStack": {
+    "language": "Python 3.11+",
+    "packageManager": "uv",
+    "webFramework": "FastAPI with uvicorn",
+    "macOSInterop": "pyobjc-framework-Cocoa, pyobjc-framework-Quartz, pyobjc-framework-ApplicationServices",
+    "testing": "pytest, pytest-asyncio",
+    "typeChecking": "mypy --strict",
+    "linter": "ruff",
+    "storage": "filesystem (~/Library/Application Support/Trace[-dev]/trajectories/) + SQLite for index",
+    "schemaValidation": "jsonschema against contracts/trajectory.schema.json"
+  },
+  "contracts": {
+    "outputDirectory": "~/Library/Application Support/Trace[-dev]/trajectories/<uuid>/",
+    "outputStructure": {
+      "metadata.json": "Object with keys: id (uuid), label, started_at (ISO8601), stopped_at (ISO8601 or null), display_info {width, height, scale_factor}, app_focus_history [{bundle_id, name, entered_at, exited_at}]",
+      "events.jsonl": "One JSON event per line; schema in contracts/trajectory.schema.json",
+      "screenshots/NNNN.png": "Keyframe screenshots, 4-digit zero-padded sequence number matching an event's seq"
+    },
+    "eventShape": {
+      "seq": "integer, 1-indexed, monotonic within a trajectory",
+      "timestamp_ms": "integer, unix ms",
+      "type": "string, one of: click, keypress, scroll, app_switch, window_focus, text_input, keyframe, tap_reenabled",
+      "screenshot_ref": "string or null, e.g. 'screenshots/0042.png'",
+      "app": "object {bundle_id, name, pid}",
+      "target": "object or null {role, label, description, frame {x, y, w, h}, ax_identifier}",
+      "payload": "object, type-specific; see contracts/trajectory.schema.json"
+    },
+    "coordinateSystem": "Screen points (not pixels) — Retina-independent. display_info.scale_factor is stored so consumers can convert if needed."
+  },
+  "userStories": [
+    {
+      "id": "R-001",
+      "title": "Package scaffold and uv workspace setup",
+      "description": "As a developer, I need the services/recorder Python package scaffolded with uv, pyproject.toml, mypy strict config, ruff config, and pytest config so every later story can run quality checks.",
+      "acceptanceCriteria": [
+        "services/recorder/ exists with src layout (src/recorder/__init__.py, src/recorder/__main__.py)",
+        "pyproject.toml declares dependencies: fastapi, uvicorn, pyobjc-framework-Cocoa, pyobjc-framework-Quartz, pyobjc-framework-ApplicationServices, jsonschema, pydantic>=2",
+        "dev dependencies: pytest, pytest-asyncio, mypy, ruff, types-* as needed",
+        "mypy configured for --strict on recorder package; pyobjc modules ignored via [[tool.mypy.overrides]]",
+        "ruff configured with sensible defaults (line length 100, target-version py311)",
+        "pytest configured to discover tests in tests/recorder/",
+        "uv sync completes without error",
+        "uv run ruff check services/recorder passes (no source to lint yet is OK)",
+        "uv run mypy --strict services/recorder passes (no source yet is OK)",
+        "uv run pytest tests/recorder/ exits 0 with 'no tests collected' — tests directory must exist"
+      ],
+      "priority": 1,
+      "passes": true,
+      "notes": "Foundation story. No functional code. Every later Ralph iteration depends on these commands working. Do NOT add application code in this story — keep it purely scaffolding."
+    },
+    {
+      "id": "R-002",
+      "title": "JSON schema for trajectory events",
+      "description": "As the recorder module, I need a locked JSON schema for trajectory events so downstream modules (Synthesizer, Runner) and tests can validate trajectories structurally.",
+      "acceptanceCriteria": [
+        "contracts/trajectory.schema.json exists at repo root and is a valid JSON Schema draft 2020-12",
+        "Schema defines the event shape: seq, timestamp_ms, type, screenshot_ref, app, target, payload",
+        "Schema defines type enum: click, keypress, scroll, app_switch, window_focus, text_input, keyframe, tap_reenabled",
+        "Schema defines per-type payload shapes (click button+modifiers+drag_to; keypress keys; text_input text+field_label; scroll direction+delta; app_switch from_bundle_id+to_bundle_id; window_focus window_title; keyframe reason)",
+        "Schema defines metadata.json shape: id, label, started_at, stopped_at, display_info, app_focus_history",
+        "Python helper module services/recorder/src/recorder/schema.py exposes load_event_schema() and validate_event(event_dict) using jsonschema",
+        "tests/recorder/test_schema.py: at least 5 valid example events pass validation; at least 5 malformed events fail with useful errors",
+        "mypy --strict passes",
+        "ruff check passes",
+        "pytest passes"
+      ],
+      "priority": 2,
+      "passes": true,
+      "notes": "This is the locked contract. Changing it after Synthesizer or Runner have shipped requires coordinated changes. Keep it conservative — err toward required fields being optional if unsure. Adding required fields later is breaking; making optional fields required later is breaking too."
+    },
+    {
+      "id": "R-003",
+      "title": "Trajectory writer: directory layout, atomic writes, metadata",
+      "description": "As the recorder module, I need a TrajectoryWriter class that creates the trajectory directory, writes metadata.json atomically, appends events to events.jsonl, and writes screenshots with zero-padded filenames, so capture never corrupts an in-progress trajectory.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/writer.py exposes TrajectoryWriter class",
+        "Constructor takes a root directory and a label; generates uuid and creates <root>/<uuid>/ and <root>/<uuid>/screenshots/",
+        "write_metadata(metadata: dict) writes metadata.json atomically (write to .tmp, fsync, rename)",
+        "append_event(event: dict) validates against schema, assigns seq if missing, writes one JSON line to events.jsonl, flushes after write",
+        "write_screenshot(seq: int, png_bytes: bytes) writes screenshots/NNNN.png where NNNN is zero-padded 4 digits",
+        "close() finalizes stopped_at in metadata and closes the events file handle",
+        "Directory permissions set to 0700 on creation",
+        "tests/recorder/test_writer.py: round-trip test (write 10 events + 3 screenshots, close, re-read, verify structure)",
+        "tests/recorder/test_writer.py: schema-violation test (append_event with bad shape raises ValidationError before writing)",
+        "tests/recorder/test_writer.py: concurrent-append test (writer.append_event called from 5 threads produces events with distinct, monotonically increasing seq)",
+        "mypy --strict passes",
+        "ruff check passes",
+        "pytest passes"
+      ],
+      "priority": 3,
+      "passes": true,
+      "notes": "The seq counter must be thread-safe — event tap runs on a background thread and text aggregator runs on the main thread, they both append events."
+    },
+    {
+      "id": "R-004",
+      "title": "macOS permission detection and structured errors",
+      "description": "As the recorder, I need to detect missing Accessibility, Screen Recording, and Input Monitoring permissions before starting a recording, and return a structured error the UI can act on, so the user isn't left confused by silent failures.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/permissions.py exposes check_permissions() returning a dict {accessibility: bool, screen_recording: bool, input_monitoring: bool}",
+        "Accessibility check uses AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False}) — must NOT prompt (UI decides when to prompt)",
+        "Screen Recording check attempts CGDisplayStreamCreate or CGPreflightScreenCaptureAccess equivalent; returns False if denied",
+        "Input Monitoring check is best-effort — attempt to create a listen-only CGEventTap on a no-op event mask and see if it returns a valid tap",
+        "A helper get_missing_permissions_error() returns a structured dict: {error: 'missing_permission', permissions: [list of missing], how_to_grant: {permission: human_readable_instructions}} when any are missing, else None",
+        "tests/recorder/test_permissions.py: mocks the underlying framework calls and verifies each permission combination produces the right output",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 4,
+      "passes": true,
+      "notes": "These checks must not prompt the user — the Tauri UI will own the prompting UX. The check is pure inspection. If PyObjC doesn't expose CGPreflightScreenCaptureAccess directly, use a workaround (attempt to grab a 1x1 screenshot and check for failure)."
+    },
+    {
+      "id": "R-005",
+      "title": "Event tap: global mouse and keyboard capture",
+      "description": "As the recorder, I need a background thread running a passive CGEventTap that captures mouse clicks, key events, and scroll events across all applications, so I can feed them to the event pipeline.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/event_tap.py exposes EventTap class with start(), stop(), and a callback registration",
+        "Uses CGEventTapCreate with kCGHIDEventTap and kCGEventTapOptionListenOnly — never swallows or modifies events",
+        "Event mask covers: mouse down/up (left/right/other), key down, flags changed, scroll wheel",
+        "Runs its own CFRunLoop on a dedicated threading.Thread",
+        "When OS disables the tap under load (kCGEventTapDisabledByTimeout or kCGEventTapDisabledByUserInput), auto-reenables via CGEventTapEnable and emits a 'tap_reenabled' event to the callback",
+        "stop() cleanly exits the run loop and joins the thread with a 2-second timeout",
+        "Callback receives a normalized dict: {cg_event_type, timestamp_ms, location_x, location_y, modifiers, key_code (if applicable), scroll_delta (if applicable)}",
+        "tests/recorder/test_event_tap.py: starts tap with a mock callback, synthesizes events via CGEventPost, verifies callback receives them (this is a real integration test — mark it with @pytest.mark.macos and skip on CI without a display)",
+        "Unit test: tap_reenabled event emitted when CGEventTap is disabled (simulate by posting a fake kCGEventTapDisabledByTimeout)",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 5,
+      "passes": true,
+      "notes": "This is the most PyObjC-heavy story. Ralph may struggle with PyObjC signatures — if stuck, consult Apple's CGEventTap docs and the pyobjc-framework-Quartz source for exact function bindings. The integration test requires Accessibility permission; document this in tests/recorder/README.md so the human tester can grant it."
+    },
+    {
+      "id": "R-006",
+      "title": "Accessibility target resolution at screen coordinates",
+      "description": "As the recorder, when a click happens, I need to resolve the AX element under the cursor into a semantic target (role, label, description, frame, ax_identifier) so downstream modules know what was clicked, not just where.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/ax_resolver.py exposes resolve_element_at(x: float, y: float) -> Optional[dict]",
+        "Uses AXUIElementCreateSystemWide + AXUIElementCopyElementAtPosition",
+        "Returned dict has keys: role, label, description, frame {x, y, w, h}, ax_identifier — any may be None if unavailable, but frame is always present when a target is returned",
+        "If the hit element has no label and no description, walks up to ancestors (max 3 levels) looking for a meaningful label — returns the first ancestor with a non-empty label",
+        "Timeouts at 200ms total (use a threading.Timer or asyncio.wait_for); returns None on timeout",
+        "Handles AXError gracefully — never raises past the module boundary; logs warnings via the standard logging module",
+        "tests/recorder/test_ax_resolver.py: integration test against a known macOS app (use Finder — open a window, resolve the toolbar, verify role=AXButton etc.); mark with @pytest.mark.macos",
+        "Unit test with mocked AXUIElementCopyElementAtPosition: verifies ancestor walk logic",
+        "Unit test: 200ms timeout respected when mock AX calls sleep",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 6,
+      "passes": true,
+      "notes": "Many apps have shallow AX trees (especially Electron apps pre-2023). The ancestor walk is critical. If a Ralph iteration gets stuck on PyObjC AX bindings, check ApplicationServices.AXUIElementCopyAttributeValue signatures in the pyobjc source — the return tuple (error_code, value) trips people up."
+    },
+    {
+      "id": "R-007",
+      "title": "App and window focus tracking via NSWorkspace notifications",
+      "description": "As the recorder, I need to track which app and window is currently focused, emit app_switch events when focus changes, and attach current-app info to every event, so the trajectory reflects cross-app workflows.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/focus_tracker.py exposes FocusTracker class",
+        "Subscribes to NSWorkspaceDidActivateApplicationNotification via NSWorkspace.sharedWorkspace().notificationCenter()",
+        "Tracks current focused app: {bundle_id, name, pid}",
+        "Tracks current focused window title via AXUIElement on the focused app",
+        "Exposes get_current_app() -> dict and get_current_window_title() -> Optional[str]",
+        "Callback registration: on_app_switch(callback) fires with {from_bundle_id, to_bundle_id, from_name, to_name}; on_window_focus_change(callback) fires with {window_title, app_bundle_id}",
+        "Maintains app_focus_history list for metadata.json — appended on every app switch",
+        "tests/recorder/test_focus_tracker.py: mocks NSWorkspace notifications, verifies callbacks fire with correct payload",
+        "Integration test: starts tracker, switches between two real apps via subprocess (e.g. osascript), verifies events fire; @pytest.mark.macos",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 7,
+      "passes": true,
+      "notes": "Window title polling can be expensive — only poll when the focused app changes OR when an AXFocusedWindowChanged notification fires, never on a timer."
+    },
+    {
+      "id": "R-008",
+      "title": "Text input aggregation by focused field",
+      "description": "As the recorder, I need to aggregate individual keystrokes into per-field text_input events (emitted on field blur or 1.5s idle) rather than storing raw keycode streams, so skills are readable and storage stays manageable.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/text_aggregator.py exposes TextAggregator class",
+        "Accepts key events from the event tap (only non-modifier keys — modifier-held combinations are keyboard shortcuts and emit separate keypress events)",
+        "Buffers typed characters per (app_bundle_id, ax_identifier-or-frame-fingerprint) field identity",
+        "Resolves the current focused text field via AX (AXFocusedUIElement) — if none, falls back to app-level buffering",
+        "Emits a text_input event when: (a) focus leaves the field, (b) 1.5 seconds of idle, (c) trajectory stops",
+        "text_input event payload: {text: aggregated_string, field_label: ax_label_or_none}",
+        "Handles backspace and delete correctly — remove last character from buffer",
+        "Does NOT emit text_input events for empty buffers (e.g., user typed 5 chars then deleted all 5)",
+        "Pure keyboard shortcuts (anything with cmd/ctrl/opt modifiers held) do NOT enter the text aggregator — they flow through as keypress events",
+        "tests/recorder/test_text_aggregator.py: simulates a keystroke sequence, verifies aggregated text_input event is emitted on idle timeout",
+        "tests/recorder/test_text_aggregator.py: backspace test (type 'hello', backspace x2, expect 'hel')",
+        "tests/recorder/test_text_aggregator.py: field-switch test (type in field A, focus moves to field B, expect field A event emitted before field B buffering begins)",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 8,
+      "passes": true,
+      "notes": "This is the cleanest semantic gain over pixel-level recording. Sensitive-field redaction is explicitly out of scope for v1 per CLAUDE.md — do NOT add it here even if it seems helpful. For v1, anything typed is captured as-is. That is a deliberate personal-use decision documented in the overview."
+    },
+    {
+      "id": "R-009",
+      "title": "Screenshot capture with keyframe policy",
+      "description": "As the recorder, I need to capture screenshots as keyframes (not per-event) according to a defined policy — every 5 seconds, on app switch, just before/after each click — so the trajectory has visual context without exploding in size.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/screenshot.py exposes capture_main_display() -> bytes (PNG)",
+        "Uses CGWindowListCreateImage with kCGNullWindowID and kCGWindowListOptionOnScreenOnly, kCGWindowImageDefault",
+        "Converts NSBitmapImageRep to PNG bytes",
+        "services/recorder/src/recorder/keyframe_policy.py exposes KeyframePolicy class",
+        "Policy triggers a keyframe on: (a) every 5 seconds while recording, (b) app_switch events, (c) just before each click (pre-click) and just after (post-click, 100ms delay)",
+        "Exposes should_capture(event_type, seconds_since_last_keyframe) -> bool",
+        "Keyframe events in events.jsonl have type='keyframe' with payload {reason: 'periodic'|'app_switch'|'pre_click'|'post_click'}",
+        "Screenshots are referenced by the event's seq, filename pattern screenshots/NNNN.png",
+        "tests/recorder/test_keyframe_policy.py: unit tests for each trigger condition",
+        "tests/recorder/test_screenshot.py: integration test that captures a real screenshot and verifies PNG validity (file starts with PNG magic bytes, Pillow can open it); @pytest.mark.macos",
+        "Retina sanity check: captured screenshot dimensions match display_info resolution",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 9,
+      "passes": true,
+      "notes": "On Retina displays, CGWindowListCreateImage returns pixel-density images. metadata.json's display_info.scale_factor must reflect this so the Runner can map click coordinates correctly. Test this on a real Retina Mac — do not trust unit tests here."
+    },
+    {
+      "id": "R-010",
+      "title": "Recording session orchestrator wiring all capture components together",
+      "description": "As the recorder, I need a RecordingSession class that starts/stops all capture components (event tap, focus tracker, text aggregator, keyframe timer), multiplexes their events into the trajectory writer with monotonic seq, and handles clean shutdown, so recording works as a unified whole.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/session.py exposes RecordingSession class",
+        "start(label: str) -> session_id: initializes TrajectoryWriter, checks permissions (aborts with structured error if missing), starts EventTap, FocusTracker, TextAggregator, and a periodic keyframe timer",
+        "stop() -> summary: stops all components, flushes in-flight text_input buffers, closes the writer, returns {trajectory_id, event_count, duration_ms}",
+        "Registered callbacks convert raw capture-component events into schema-valid events and append them via TrajectoryWriter",
+        "A single threading.Lock guards seq assignment and writer.append_event calls",
+        "Click events trigger: pre-click keyframe → AX target resolution → click event with target → post-click keyframe (100ms delayed)",
+        "Idempotent stop() — calling stop twice is safe",
+        "Max one active session at a time — calling start() while active raises a clear error",
+        "tests/recorder/test_session.py: mock out EventTap and FocusTracker, feed synthetic events, verify trajectory directory structure and event sequence",
+        "Integration test: start a session, do nothing for 10 seconds, stop — expect at least 2 periodic keyframes, one app_switch (or none), metadata with correct timestamps; @pytest.mark.macos",
+        "mypy --strict passes",
+        "ruff check passes",
+        "pytest passes"
+      ],
+      "priority": 10,
+      "passes": true,
+      "notes": "This is the integration point where the event-tap thread hands events to the writer. The lock around seq assignment + writer.append_event is critical — without it, seq values can collide under high event rate."
+    },
+    {
+      "id": "R-011",
+      "title": "FastAPI service mounting recorder endpoints on the gateway",
+      "description": "As the Tauri frontend, I need HTTP endpoints to start/stop recording, check recording status, list trajectories, fetch a specific trajectory, and delete one, so the UI can drive the recorder.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/api.py exposes a FastAPI APIRouter mounted at /recorder in the gateway",
+        "POST /recorder/start body {label?: string} — starts a session, returns {trajectory_id} or 409 if already recording, or 403 with permissions error if any missing",
+        "POST /recorder/stop no body — stops the active session, returns {trajectory_id, event_count, duration_ms} or 409 if not recording",
+        "GET /recorder/status — returns {recording: bool, current_trajectory_id: string|null, started_at: string|null}",
+        "GET /trajectories — lists all trajectories with {id, label, started_at, duration_ms, event_count}",
+        "GET /trajectories/{id} — returns full metadata + events + screenshot URLs (served as static files)",
+        "DELETE /trajectories/{id} — removes the trajectory directory; 404 if not found; 409 if it is the active one",
+        "Static file mount at /trajectories/{id}/screenshots/{filename} serves PNGs from the trajectory directory",
+        "gateway/main.py creates the FastAPI app and mounts the recorder router",
+        "tests/recorder/test_api.py uses httpx.AsyncClient against the FastAPI app: tests each endpoint with mocked RecordingSession",
+        "tests/recorder/test_api.py: start-while-recording returns 409",
+        "tests/recorder/test_api.py: start-without-permissions returns 403 with structured error body",
+        "uv run uvicorn gateway.main:app --host 127.0.0.1 --port 8765 starts cleanly",
+        "mypy --strict passes",
+        "ruff check passes",
+        "pytest passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "The gateway will later also mount /synthesize and /run — keep gateway/main.py structured so other modules can add their routers without touching recorder code. Bind to 127.0.0.1 ONLY — never 0.0.0.0 — this service must not be network-reachable."
+    },
+    {
+      "id": "R-012",
+      "title": "Trajectory index SQLite for fast list queries",
+      "description": "As the API, I need a SQLite index of trajectories so GET /trajectories is fast even with hundreds of recordings and doesn't have to scan every directory on disk.",
+      "acceptanceCriteria": [
+        "services/recorder/src/recorder/index_db.py exposes IndexDB class backed by SQLite at <app_support>/index.db",
+        "Schema: trajectories(id TEXT PRIMARY KEY, label TEXT, started_at TEXT, stopped_at TEXT, event_count INTEGER, duration_ms INTEGER)",
+        "TrajectoryWriter inserts a row on creation and updates it on close()",
+        "DELETE /trajectories/{id} removes the row",
+        "GET /trajectories reads from the index, not the filesystem",
+        "A reconcile() method scans the trajectories directory and rebuilds the index (for recovery from a crash or manual filesystem edit)",
+        "Startup of the recorder service runs reconcile() once",
+        "tests/recorder/test_index_db.py: insert, update, delete, list, reconcile",
+        "tests/recorder/test_index_db.py: reconcile test — delete a trajectory directory by hand while its row exists, run reconcile, verify row removed",
+        "mypy --strict passes",
+        "ruff check passes",
+        "pytest passes"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "SQLite is enough for v1 — do not introduce an ORM. Use sqlite3 directly with parameterized queries."
+    },
+    {
+      "id": "R-013",
+      "title": "Reference trajectory fixtures for the five reference workflows",
+      "description": "As downstream modules (Synthesizer, Runner) and as an acceptance bar for the recorder itself, I need canonical recorded trajectories for each of the five reference workflows committed to the repo so downstream tests can run without re-recording.",
+      "acceptanceCriteria": [
+        "fixtures/trajectories/gmail_reply/ exists with metadata.json, events.jsonl, and a screenshots/ subdirectory (screenshots may be small synthetic PNGs to keep repo size down, as long as they are valid PNGs)",
+        "Same for calendar_block, finder_organize, slack_status, notes_daily",
+        "Each fixture passes validation via schema.validate_event on every line of events.jsonl",
+        "Each fixture has at least one click with a resolved AX target, one text_input with a field_label, and one app_switch",
+        "A script scripts/regenerate_fixtures.sh documents how a human can re-record these on a real machine (not run by Ralph — human-only)",
+        "tests/recorder/test_fixtures.py: iterates all 5 fixtures, parses them, asserts per-fixture minimums above",
+        "tests/recorder/test_fixtures.py: passes",
+        "A tests/recorder/README.md section documents the fixtures and how to regenerate them",
+        "Total fixtures directory size under 5MB (compress screenshots if needed)",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "For the Ralph loop, you can generate these fixtures synthetically (hand-crafted JSON that looks like what a real recording would produce). A human will replace them with real recordings during smoke testing. This is the one story where Ralph is NOT expected to produce real user data — synthetic fixtures that pass the schema are acceptable."
+    },
+    {
+      "id": "R-014",
+      "title": "End-to-end integration test of the recorder via the HTTP API",
+      "description": "As a confidence check, I need an integration test that drives the recorder end-to-end via its HTTP API — starts a recording, simulates a short synthetic workflow, stops, and validates the resulting trajectory — so regressions are caught.",
+      "acceptanceCriteria": [
+        "tests/recorder/test_e2e.py starts the FastAPI app via httpx ASGI transport",
+        "Test mocks EventTap, FocusTracker, and screenshot capture (all macOS-dependent pieces) with fakes that emit deterministic synthetic events",
+        "Test: POST /recorder/start → expect {trajectory_id}",
+        "Test: emit 5 fake clicks, 2 fake text inputs, 1 fake app switch via the fakes",
+        "Test: POST /recorder/stop → expect {trajectory_id, event_count >= 8}",
+        "Test: GET /trajectories/{id} → response validates against expected structure",
+        "Test: DELETE /trajectories/{id} → 200, then GET /trajectories/{id} returns 404",
+        "Test passes end-to-end without requiring macOS permissions (because all macOS pieces are mocked)",
+        "pytest passes",
+        "mypy --strict passes",
+        "ruff check passes"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "The point of mocking the macOS pieces here is so this test runs in any environment — Ralph's sandbox, CI, whatever. Real macOS verification happens in the human smoke test (R-015)."
+    },
+    {
+      "id": "R-015",
+      "title": "Human smoke test checklist for real-machine verification",
+      "description": "As the final acceptance gate, I need a smoke test checklist that a human runs on a real Mac after the Ralph loop completes, covering all 5 reference workflows recorded live, so we know the recorder actually works on real hardware.",
+      "acceptanceCriteria": [
+        "tests/recorder/smoke.md exists as a human-checklist markdown file",
+        "Checklist section per reference workflow with checkboxes: [ ] permissions granted, [ ] started recording via POST /recorder/start, [ ] performed the workflow on a real machine, [ ] stopped recording, [ ] GET /trajectories/{id} returns sensible data",
+        "Per-workflow expected signals: event counts in a reasonable range, at least N clicks with resolved AX targets (N listed per workflow), at least one text_input event, at least one app_switch, at least 5 keyframe screenshots",
+        "Storage sanity: trajectory directory size is under 30MB for a 3-minute recording",
+        "Kill-tap test: checklist item to hog CPU for 10 seconds during recording, verify a tap_reenabled event appears in events.jsonl afterwards",
+        "Permission denial test: revoke Accessibility permission, POST /recorder/start, verify 403 response with structured error",
+        "The smoke.md file includes a 'sign-off' section at the end where the human tester writes the date and the macOS version they tested on",
+        "The Ralph loop MUST NOT output the completion promise until the smoke.md has the sign-off section filled in — Ralph should detect this and report 'awaiting human smoke test' instead"
+      ],
+      "priority": 15,
+      "passes": true,
+      "notes": "This is the story that prevents Ralph from declaring victory on pure unit-test pass. A real human has to run the workflows on a real Mac. The Ralph loop must refuse to output RECORDER_DONE if the sign-off is missing — implement this as a pre-promise check in the prompt.md / CLAUDE.md instructions."
+    }
+  ],
+  "constraints": {
+    "scope": [
+      "macOS only (no Windows, no Linux)",
+      "Main display only (no multi-monitor awareness in v1)",
+      "No password/sensitive-field redaction in v1 (documented personal-use decision)",
+      "No audio or camera capture",
+      "No cross-desktop/space recording",
+      "No shell execution by the recorder (it is pure capture)"
+    ],
+    "performance": {
+      "eventLatency": "< 50ms from user action to event appended to events.jsonl",
+      "screenshotCapture": "< 200ms per keyframe",
+      "axResolution": "< 200ms per click (hard timeout, returns null on timeout)",
+      "stopLatency": "< 500ms from POST /recorder/stop to response",
+      "storage": "< 30MB per 3 minutes of typical workflow recording"
+    },
+    "resources": {
+      "timeline": "1–2 weeks for this module",
+      "teamSize": "1 (solo, Ralph-assisted)",
+      "apiCost": "$0 — this module does NOT call any LLM"
+    },
+    "macOSPermissions": [
+      "Accessibility (required for event tap and AX queries)",
+      "Screen Recording (required for screenshots)",
+      "Input Monitoring (required for CGEventTap on some macOS versions)"
+    ]
+  },
+  "security": {
+    "network": "FastAPI binds to 127.0.0.1 ONLY. Never 0.0.0.0. Not network-reachable.",
+    "filesystem": "All trajectory data under ~/Library/Application Support/Trace[-dev]/ with dir perms 0700. No writes outside this tree.",
+    "secrets": "This module does not handle any secrets or API keys. No Anthropic calls.",
+    "dataHandling": "Plaintext on disk. No encryption at rest in v1. Documented personal-use decision — revisit before any multi-user scenarios.",
+    "ralphGuardrails": [
+      "Ralph iterations write to Trace-dev/, never Trace/",
+      "Ralph iterations do NOT have Accessibility or Screen Recording permissions in their sandbox — integration tests using real macOS APIs must be marked @pytest.mark.macos and skip gracefully when permissions are missing",
+      "Ralph MUST NOT output the completion promise until tests/recorder/smoke.md has a filled-in human sign-off section"
+    ]
+  },
+  "nonGoals": [
+    "LLM-based interpretation of the trajectory (that is the Synthesizer's job)",
+    "Skill file generation (Synthesizer)",
+    "Workflow replay or computer-use (Runner)",
+    "A UI — this module is a pure HTTP service; the Tauri frontend is a separate branch",
+    "Windows/Linux support",
+    "Cloud upload or sync",
+    "Multi-monitor recording",
+    "Password/auth-token redaction",
+    "Drag-and-drop capture fidelity (v1 represents drags as click pairs with acknowledged imperfection)",
+    "Recording during login screens or secure fields handled by the system"
+  ],
+  "successMetrics": {
+    "schemaStability": "No breaking changes to contracts/trajectory.schema.json after R-002 is merged",
+    "referenceWorkflowCoverage": "All 5 reference workflows record with a trajectory that passes R-015 smoke criteria",
+    "testCoverage": "> 85% line coverage on services/recorder/ via pytest-cov (excluding PyObjC-wrapper modules which require real macOS APIs)",
+    "cleanQualityGates": "uv run ruff check, uv run mypy --strict, uv run pytest all pass at every commit",
+    "storage": "A 3-minute reference recording fits in < 30MB"
+  },
+  "openQuestions": [
+    "Drag-and-drop: v1 captures as click-pairs. Is that fidelity enough for the reference workflows (finder_organize has drag intent)? Revisit after R-015.",
+    "App-focus polling interval: we rely on NSWorkspace notifications but some apps don't fire them cleanly (older Electron). Is a 2-second poll fallback needed? Defer decision to smoke test results.",
+    "events.jsonl fsync frequency: flush-after-write is probably enough, but under a hard crash we may lose a few events. Acceptable for v1 — flag for v2.",
+    "Where does the recorder service run? For v1 it's spawned by the Tauri app as a subprocess. Document the process supervision approach once integration branch starts."
+  ]
+}

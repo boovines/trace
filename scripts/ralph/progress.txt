@@ -1,3 +1,449 @@
 # Ralph Progress Log
 Started: Wed Apr 22 15:33:38 EDT 2026
+
+## Codebase Patterns
+- `services/recorder` uses a **src layout** (`services/recorder/src/recorder/…`); future files (schema.py, writer.py, session.py, etc.) go under `src/recorder/`.
+- The recorder package is installed as a uv workspace member (`trace-recorder`) and should be imported as `from recorder.xyz import …`, NOT `services.recorder.recorder.xyz`.
+- Root `pyproject.toml` owns shared tooling config (ruff/mypy/pytest); per-service `pyproject.toml` only declares that service's runtime deps + hatchling build.
+- Ruff's isort needs `known-first-party = ["recorder", "synthesizer", "runner", "gateway"]` or it misgroups the workspace imports in gateway/main.py.
+- PyObjC wheels only exist for macOS — deps are marked `; sys_platform == 'darwin'` so `uv sync` still works if Ralph ever runs on non-darwin.
+- `mypy --strict` has PyObjC module overrides in root pyproject (`Cocoa.*`, `Quartz.*`, `ApplicationServices.*`, `AppKit.*`, `Foundation.*`, `objc.*`); add new PyObjC module imports here, not in each file.
+- Quality-gate commands for the recorder module are:
+  - `uv run ruff check services/recorder`
+  - `uv run mypy --strict services/recorder`
+  - `uv run pytest tests/recorder/`
+- Pre-existing gateway/integration test failures (`ModuleNotFoundError: gateway`) are NOT caused by R-001 and are outside this branch's scope — a future `feat/integration` story will install gateway as a proper package.
+- **Schema validation**: `recorder.schema` exposes `validate_event(event)` / `validate_metadata(meta)` backed by `jsonschema`'s Draft 2020-12 validator (with `FORMAT_CHECKER` enabled for `uuid`/`date-time`). Future writer/session code should call these before writing JSON to disk so bad events never land in `events.jsonl`.
+- **Schema file lookup**: `recorder.schema.find_schema_path()` walks up from `__file__` to find `contracts/trajectory.schema.json`. Works for the uv-workspace editable install. If the contracts ever move or get bundled into the wheel, update this function — do NOT hardcode a path.
+- **Local `$ref` only**: the `load_event_schema()` / `load_metadata_schema()` wrappers build standalone schemas with a `#/$defs/...` fragment ref (no `$id`), which keeps `jsonschema` from trying to HTTP-fetch the schema's `$id` URL at validate time. If you add new top-level sub-schemas for Synthesizer/Runner to reuse, follow the same pattern.
+- **TrajectoryWriter ownership**: `recorder.writer.TrajectoryWriter` is the only module allowed to mutate the on-disk trajectory directory. All writes go through its lock; session/orchestrator code must not write `events.jsonl` / `metadata.json` / `screenshots/*` directly. It validates via `recorder.schema.validate_{event,metadata}` BEFORE any disk write, so bad data never leaks to disk. The constructor creates `<root>/<uuid>/` + `screenshots/` with perms `0700` and the writer is usable as a context manager (`__exit__` calls `close()`).
+- **Atomic JSON writes**: `_atomic_write_json(path, data)` writes to `<path>.tmp`, fsyncs, and renames. Use it for any metadata-style file. `events.jsonl` is append-flush (no fsync per line — documented v1 tradeoff).
+- **Datetime import style**: use `from datetime import UTC, datetime` (Python 3.11+). Ruff's `UP017` flags `timezone.utc` — don't revive it. ISO strings are produced with `datetime.now(UTC).isoformat(timespec="milliseconds")` which yields `+00:00` suffixes; the schema's `format: date-time` accepts both `+00:00` and `Z`.
+- **Ruff SIM105**: prefer `with contextlib.suppress(OSError): os.fsync(...)` over `try/except/pass` for best-effort fsync on filesystems that don't support it (tmpfs in pytest tmp_path).
+- **PyObjC mocking in tests**: for any module that does `from ApplicationServices import X` / `from Quartz import Y` inside a function, tests stub the framework by installing a `types.ModuleType("Quartz")` / `types.ModuleType("ApplicationServices")` into `sys.modules` via `monkeypatch.setitem`. The import inside the tested function then resolves to the stub. For ImportError coverage, install a stub that is missing the expected attributes — `from X import missing_attr` raises ImportError, which the module under test should catch.
+- **Permission-check pattern**: `recorder.permissions` keeps each macOS framework call in its own thin `_check_*` helper, and `check_permissions()` / `get_missing_permissions_error()` simply compose them. Tests patch the helpers for combination coverage and patch the PyObjC symbols inside `sys.modules` for helper-level coverage. Use the same pattern for any future PyObjC-backed module (event_tap, ax_resolver, focus_tracker, screenshot) to keep the suite hermetic on Ralph's sandbox.
+- **`@pytest.mark.macos` is opt-in only**: `tests/recorder/conftest.py` auto-skips every test tagged `macos` unless `TRACE_RUN_MACOS_TESTS=1` is set. Use this marker for ANY test that needs real PyObjC framework behaviour (CGEventTap, AXUIElement, CGWindowListCreateImage, etc.). Hermetic unit coverage should still be provided alongside via `sys.modules`-stubbed Quartz/ApplicationServices so the default run stays green.
+- **Splitting PyObjC callback from normaliser**: for modules driven by a C-callback (CGEventTap), put the pure event→dict conversion in a module-level function that takes the framework module as a parameter (`_normalise_event(code, event, quartz)`), and expose a thin `handle_cg_event(code, event)` method on the class that the tap callback delegates to. Tests exercise the normaliser + re-enable logic by calling `handle_cg_event` with fake events — no run-loop or thread needed. `event_tap.py` is the reference implementation.
+- **Re-enabling a disabled tap**: `CGEventTapEnable(tap, True)` re-arms a tap the OS disabled via `kCGEventTapDisabledByTimeout` / `kCGEventTapDisabledByUserInput`. Both constants appear as unsigned `uint32` (0xFFFFFFFE / 0xFFFFFFFF) in headers but PyObjC sometimes surfaces them as signed ints (-2 / -1); match both forms.
+- **Bounded-time framework calls**: when a PyObjC call could block indefinitely (AX queries, inter-app RPC), wrap it with a daemon `threading.Thread` and a `threading.Event` set in a `finally`. The caller `event.wait(timeout)` — on timeout the worker thread just keeps living as a daemon. Do not rely on `Thread.join(timeout)` alone to tell "done" from "still running"; always use a separate event sentinel. See `ax_resolver.resolve_element_at` for the reference.
+- **PyObjC AX value shapes**: AX position/size attributes come back as one of three shapes depending on macOS/PyObjC version — native 2-tuple, bridged object with `.x/.y` or `.width/.height`, or raw `AXValueRef` that must be unwrapped via `AXValueGetValue(value, kAXValueCG{Point,Size}Type, None) -> (success, unpacked)`. Any new AX-consuming code should tolerate all three (see `_unpack_ax_value` in ax_resolver.py).
+- **NSWorkspace subscription pattern**: prefer `addObserverForName:object:queue:usingBlock:` (a Python callable passed as block) over the NSObject-subclass selector pattern — it keeps the handler method on the Python class and avoids `@objc.selector` machinery. The block returns an opaque observer handle that must be passed back to `removeObserver:` on stop. Tests stub `AppKit.NSWorkspace.sharedWorkspace().notificationCenter()` with a class that captures `(name, block)` in a list so we can invoke the block synchronously with a fake notification. See `focus_tracker._subscribe_workspace` for the reference.
+- **NSDictionary dual-access**: `userInfo()` on an `NSNotification` is bridged to a Python dict in most PyObjC builds but not all. Accept both by trying `.get(key)` first (callable on a bridged dict) and falling back to `objectForKey_(key)` on an ObjC-only stub. Same pattern applies to any NSDictionary the recorder reads out of a framework callback.
+- **Idle-flush timer pattern**: for any module that aggregates into a buffer until a "nothing happened for N seconds" signal, use a `threading.RLock` around the state + a `threading.Timer` that is cancelled-and-replaced on every ingest event. The RLock (not a plain Lock) is required because the Timer's callback may take the lock while a caller-driven `flush()` is mid-flight. The Timer callback should also check an `is_stopped` flag so a late-firing cancelled timer is a silent no-op. `text_aggregator.py` is the reference.
+- **Session-layer translation of event_tap output**: `recorder.event_tap` emits modifier names in PyObjC framework style (`"command"`, `"control"`, `"option"`, …). The trajectory schema's `modifier` enum uses short forms (`"cmd"`, `"ctrl"`, `"opt"`, …). Translation happens in the session orchestrator (R-010) when shaping a schema-valid `keypress` event. Downstream consumers of event_tap (text_aggregator, session) must agree on which name style they expect — currently everything inside the recorder uses the long PyObjC names; ONLY the session's final schema-event builder maps to the short enum.
+- **Stateless policy modules**: `recorder.keyframe_policy.KeyframePolicy` is stateless — the session passes `(event_type, seconds_since_last_keyframe)` each call and the policy answers yes/no + reason. The session owns the "time since last keyframe" state and the periodic timer. Prefer this shape for any future rule-based gate (e.g. scroll-debounce) — stateless is easier to test, thread-safe by construction, and doesn't couple the rule to a particular timer impl.
+- **Class-level state in PyObjC test doubles**: when emulating the `cls.alloc().init…_(…)` two-step idiom, do NOT use mutable class attributes at the base class (RUF012). Either put state on the instance, or declare `ClassVar[...]` explicitly, or create a fresh subclass per test via `type("Name", (Base,), {...})` — the screenshot stub uses the subclass trick so each test's `rep_calls` list is isolated.
+- **PNG validation without Pillow**: the `recorder.screenshot` module exposes `PNG_MAGIC = b"\\x89PNG\\r\\n\\x1a\\n"` and rejects bytes that don't start with it. Tests synthesize a minimal valid PNG by hand (magic + IHDR + one compressed IDAT + IEND, with `zlib.crc32` for the per-chunk CRC) — avoid adding Pillow just to verify PNG shape. Dimension parsing uses `struct.unpack(">II", png[16:24])` once you've asserted `png[12:16] == b"IHDR"`.
+- **RecordingSession owns `seq`**: `recorder.session.RecordingSession` is the single place where `seq` values are minted for a running trajectory. `TrajectoryWriter` still has its own auto-seq counter (belt-and-suspenders), but every normal emit path passes a pre-assigned seq under the session's `_lock`. Any future capture path that does NOT go through the session (e.g. an HTTP admin endpoint that injects events) must either acquire the same lock or accept interleaved seqs.
+- **Session dependency injection**: every macOS-dependent piece of `RecordingSession` is injected via a constructor kwarg (`event_tap_factory`, `focus_tracker_factory`, `text_aggregator_factory`, `permissions_check`, `ax_resolver`, `screenshot_capturer`, `display_info_provider`, `keyframe_policy`). Hermetic tests pass fakes; real use passes nothing and defaults fall back to the real modules. Keep this pattern for any future orchestrator — it is the only way tests can run in Ralph's sandbox without PyObjC.
+- **Dual-lock orchestrator pattern**: `_start_stop_lock` serialises `start()`/`stop()` bookkeeping; `_lock` guards per-event state (seq, writer.append_event, last-keyframe-time, pending timers). Do NOT collapse them — `stop()` spends non-trivial time joining threads and holding that on the per-event lock would starve capture callbacks. Capture-thread callbacks check `self._active` under `_lock` and bail if False, so late callbacks after `stop()` are silent no-ops.
+- **FastAPI `Depends` pattern**: bind `Depends(...)` once at module level (`StateDep = Depends(get_recorder_state)`) and reuse it as each endpoint's default — ruff `B008` rejects inline `Depends(...)`, but FastAPI inspects the default for the `Depends` instance regardless. This is the canonical workaround.
+- **Hermetic FastAPI testing**: drive the app via `httpx.AsyncClient(transport=ASGITransport(app=app))` (no real socket) and override dependencies via `app.dependency_overrides[get_recorder_state] = lambda: state`. Do NOT mutate module-level singletons in tests — they leak across tests because pytest-asyncio reuses the event loop.
+- **HTTP path traversal testing**: `httpx.AsyncClient` normalises `..`/`.`/empty path segments BEFORE the request reaches the ASGI app, so HTTP-level traversal tests are unreliable. Unit-test the path-safety helper (e.g. `_safe_screenshot_path`) directly with raw filename strings instead of through the HTTP layer.
+- **Storage root resolution**: `recorder.storage.default_trajectories_root()` resolves prod (`Trace`) vs dev (`Trace-dev`) profile via `TRACE_DEV_MODE=1`. Tests pin a `tmp_path` via `TRACE_PROFILE_DIR`. Any new module that needs to write to the per-user app data directory should reuse this helper rather than computing its own paths.
+- **PermissionsError forwarding**: `PermissionsMissingError.error` is the structured `PermissionsError` TypedDict — return it verbatim as the 403 body via `JSONResponse(status_code=403, content=dict(exc.error))`. Synthesizer/Runner endpoints that need similar structured-error responses should follow the same shape rather than re-inventing.
+- **IndexDB is a cache, not a source of truth**: `recorder.index_db.IndexDB` mirrors per-trajectory summary fields in SQLite for fast `GET /trajectories`. The filesystem (`metadata.json` + `events.jsonl`) remains authoritative; `IndexDB.reconcile(root)` rebuilds the cache from disk and is invoked automatically in `RecorderState.__init__` so a service restart heals drift without manual intervention. Writer failures against the index are silently suppressed via `contextlib.suppress(Exception)` — a cache outage must not break a live recording.
+- **SessionFactory signature includes IndexDB**: `recorder.api.SessionFactory = Callable[[Path, IndexDB | None], RecordingSession]`. Any test that substitutes `session_factory=FakeSession` must have `FakeSession.__init__(self, root, index_db=None)`, and should forward the index_db to its `TrajectoryWriter` so `list_trajectories` assertions see the rows. Changing the factory again later is a breaking change across every test suite that mocks a session — think twice.
+- **Where the index lives**: `<app_support>/index.db` (i.e., `default_trajectories_root().parent / "index.db"`), NOT inside the `trajectories/` directory.  `recorder.storage.default_index_db_path()` is the canonical resolver — reuse rather than hardcoding. Tests pin via the same `TRACE_PROFILE_DIR` override that controls `default_trajectories_root`.
+- **duration_ms tests must tolerate sign**: `TrajectoryWriter.close()` rewrites `stopped_at` to `now()`, so a hermetic test whose `started_at` is a fixed future date will produce a negative `duration_ms`. Either assert on presence-not-sign (`is not None`), OR overwrite the index row post-close with deterministic values (that's what `FakeSession.stop()` in `test_api.py` does — then `list_trajectories` can assert `duration_ms == 1500`).
+- **Fixtures are synthetic until a human re-records**: `fixtures/trajectories/<slug>/` is produced by `scripts/generate_synthetic_fixtures.py` (Ralph/CI path). Real recordings replace them during smoke testing per `scripts/regenerate_fixtures.sh`. Downstream tests that depend on fixtures must rely only on structural contracts (schema validity, per-type event counts) — never on the literal text of a `text_input` or the pixel contents of a screenshot. `tests/recorder/test_fixtures.py` is the reference structural check.
+
+---
+
+## 2026-04-22 - R-001
+- Moved `services/recorder/recorder/` → `services/recorder/src/recorder/` (src layout per AC).
+- Added `services/recorder/src/recorder/__main__.py` for standalone `python -m recorder` dev runs.
+- Rewrote `services/recorder/pyproject.toml`: added fastapi, uvicorn, pydantic, jsonschema, PyObjC (darwin-gated) deps; added hatchling build backend pointing at `src/recorder`.
+- Updated root `pyproject.toml`: added `trace-recorder` workspace source, dev deps (pytest, pytest-asyncio, httpx, mypy, ruff, types-jsonschema), ruff known-first-party config, mypy_path for recorder src, broader PyObjC mypy overrides.
+- Updated `gateway/main.py` to import `from recorder.api import router` (installed package, not filesystem path).
+- Replaced `tests/recorder/.gitkeep` with `__init__.py` + `conftest.py` + `test_scaffold.py` placeholder that asserts `recorder.__version__`.
+- Files changed:
+  - `pyproject.toml`
+  - `services/recorder/pyproject.toml`
+  - `services/recorder/src/recorder/{__init__.py,__main__.py,api.py}` (new)
+  - `services/recorder/recorder/{__init__.py,api.py}` (deleted)
+  - `gateway/main.py`
+  - `tests/recorder/{__init__.py,conftest.py,test_scaffold.py}` (new)
+  - `tests/recorder/.gitkeep` (deleted)
+- Quality gates: ruff/mypy/pytest all green on services/recorder + tests/recorder; full-repo ruff also clean.
+- **Learnings for future iterations:**
+  - `uv sync --extra dev` is the command to pull dev tooling; plain `uv sync` skips it.
+  - `pytest` returns exit code 5 on zero-collection — the AC wanted exit 0, so added a placeholder test. Future stories can keep or replace it; don't accidentally regress to zero tests.
+  - `hatchling` with `packages = ["src/recorder"]` gives a clean editable install; no need for setuptools.
+  - When adding a new PyObjC import (e.g. `import Quartz` in R-005), also ensure the module is listed in the mypy override block in root pyproject.toml, otherwise `mypy --strict` will fail on `Any`-returning calls.
+  - Gateway already imports synthesizer/runner via `services.X.X.api` — keep those imports intact; only `recorder` moved to installed-package style in R-001.
+---
+
+## 2026-04-22 - R-002
+- Rewrote `contracts/trajectory.schema.json` as the locked R-002 contract: event shape `{seq, timestamp_ms, type, screenshot_ref, app, target, payload}` with per-type payload subschemas (click, keypress, scroll, app_switch, window_focus, text_input, keyframe, tap_reenabled) discriminated via `allOf` + `oneOf` on the `type` const. Metadata shape updated to `{id, label, started_at, stopped_at, display_info{width,height,scale_factor}, app_focus_history[{bundle_id,name,entered_at,exited_at}]}`.
+- Added `services/recorder/src/recorder/schema.py` with `find_schema_path`, `load_event_schema`, `load_metadata_schema`, `validate_event`, `validate_metadata` (Draft202012Validator + FORMAT_CHECKER for uuid/date-time).
+- Added `tests/recorder/test_schema.py` covering 8 valid events (one per type), 10 malformed events (missing required fields, unknown enum values, bad `screenshot_ref` pattern, extra top-level keys, `target` missing `frame`, seq=0, empty text_input), plus metadata happy-path / null-stopped_at / bad-uuid cases.
+- Files changed:
+  - `contracts/trajectory.schema.json` (rewritten)
+  - `services/recorder/src/recorder/schema.py` (new)
+  - `tests/recorder/test_schema.py` (new)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (24 tests).
+- **Learnings for future iterations:**
+  - `jsonschema.Draft202012Validator` does NOT validate `format` keywords by default — pass `format_checker=Draft202012Validator.FORMAT_CHECKER` to enforce `uuid`/`date-time`. Without it, `id: "not-a-uuid"` silently passes.
+  - If a sub-schema you build at runtime has an `$id` pointing at a non-resolvable URL (e.g. `https://trace.local/...`) and a `$ref` of the same URL, the `referencing` resolver will try to HTTP-fetch it and explode with `URLError`. Use a bare `#/$defs/...` fragment ref (no `$id`) to keep resolution purely local.
+  - For `oneOf` failures, the top-level `ValidationError.message` is the generic "not valid under any of the given schemas" — the specific field-level errors live in `err.context`. Tests asserting a specific needle must walk `.context` recursively (see `_collect_error_text` in `test_schema.py`).
+  - When Ralph adds R-003's writer, it should call `schema.validate_event` BEFORE `events.jsonl.write(...)` — that's the cheapest way to make "writing schema-invalid data" impossible at the module boundary.
+---
+
+## 2026-04-22 - R-003
+- Added `services/recorder/src/recorder/writer.py` exposing `TrajectoryWriter` with constructor that mints a uuid, creates `<root>/<uuid>/` + `screenshots/` at perms `0700`, and opens `events.jsonl` for append.
+- `write_metadata(metadata)` validates via `recorder.schema.validate_metadata`, then writes atomically (`.tmp` → fsync → rename) and caches the dict so `close()` can finalise `stopped_at`.
+- `append_event(event)` assigns `seq` if missing (or `None`), validates, JSON-encodes one line, flushes. A single `threading.Lock` guards seq assignment + file write so the CGEventTap background thread and the main-thread text aggregator can share a writer. The counter is kept strictly ahead of any caller-supplied seq so auto-assigned seqs never collide with pre-assigned ones.
+- `write_screenshot(seq, png_bytes)` writes `screenshots/NNNN.png` (4-digit zero-padded, extends past 4 digits for large seqs — the schema pattern allows `\d{4,}`).
+- `close()` flushes the events handle, sets `stopped_at` on metadata (reading from disk if the cached copy is absent), re-validates, and rewrites atomically. Idempotent — second `close()` is a no-op — and further `append_event` raises `RuntimeError`.
+- Also added `__enter__`/`__exit__` so the writer can be used as a context manager.
+- `tests/recorder/test_writer.py` (11 tests): directory layout + perms, duplicate-id guard, round-trip with 10 events + 3 screenshots, bad-payload rejection without disk leak, bad metadata rejection, 5×20 concurrent append with distinct monotonic seq, caller-supplied seq preservation + counter advance, idempotent close, zero-padded filename for small and 5-digit seqs, close-without-metadata safety, context-manager exit.
+- Files changed:
+  - `services/recorder/src/recorder/writer.py` (new)
+  - `tests/recorder/test_writer.py` (new)
+  - `scripts/ralph/prd.json` (R-003 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (35 tests total).
+- **Learnings for future iterations:**
+  - `datetime.now(timezone.utc)` trips ruff `UP017` on Python 3.11+ — use `from datetime import UTC` and `datetime.now(UTC)`.
+  - `tmp.replace(final)` on POSIX is atomic and works cross-device on the same filesystem; it's the right primitive for "write then swap into place".
+  - `Path.with_suffix(".png.tmp")` is wrong for multi-dot suffixes (replaces the existing `.png`). Use `path.with_name(path.name + ".tmp")` to append a suffix safely.
+  - When assigning `seq` before validating, copy the dict (`dict(event)`) so validation failures don't mutate the caller's input — this matters for the session orchestrator that may retry or re-route a rejected event.
+  - The writer's `_lock` is coarse (guards both the counter and the file handle). That's fine for the expected event rate (well under 1k events/sec); if we ever need finer granularity, split into a `seq_lock` + `write_lock` — but beware of ordering: the on-disk order must match seq order for tests and for downstream Synthesizer consumption.
+  - `close()` reading the metadata from disk as a fallback means that even if a test calls `close()` without ever calling `write_metadata()`, we don't crash — we just skip the `stopped_at` finalisation. The orchestrator should always call `write_metadata()` first, but the writer defends against the bad ordering.
+---
+
+## 2026-04-22 - R-004
+- Added `services/recorder/src/recorder/permissions.py` exposing `check_permissions()` and `get_missing_permissions_error()`.
+  - `_check_accessibility()` calls `AXIsProcessTrustedWithOptions({kAXTrustedCheckOptionPrompt: False})` — pure inspection, never prompts (the Tauri UI owns prompting UX per the PRD).
+  - `_check_screen_recording()` prefers `CGPreflightScreenCaptureAccess()` and falls back to `CGDisplayCreateImageForRect` on a 1x1 rect when preflight is missing or raises.
+  - `_check_input_monitoring()` attempts a listen-only `CGEventTapCreate` with an empty mask and treats a non-NULL return as proof of permission; the probe tap is invalidated immediately via `CFMachPortInvalidate` so no run-loop source leaks.
+  - Every helper catches `Exception` from the framework call and returns `False` — never raises past the module boundary so the HTTP layer can trust it.
+  - `get_missing_permissions_error()` emits in canonical order (accessibility → screen_recording → input_monitoring) and includes per-permission `how_to_grant` human-readable instructions keyed by the same permission name.
+- Added `tests/recorder/test_permissions.py` (24 tests):
+  - 8 parametrized combination tests for `check_permissions()` (every boolean triple).
+  - Composition tests for `get_missing_permissions_error()`: all granted returns None, single missing, all missing (canonical order), partial missing order preservation.
+  - Accessibility helper: framework truthy/falsey, framework raises, framework import broken (ImportError path).
+  - Screen Recording helper: preflight True/False, preflight raises → capture-fallback success, preflight raises → capture returns None → False.
+  - Input Monitoring helper: tap created → True + invalidate called, tap None → False, tap create raises → False, invalidate raises → True (clean-up failure doesn't taint result).
+- Files changed:
+  - `services/recorder/src/recorder/permissions.py` (new)
+  - `tests/recorder/test_permissions.py` (new)
+  - `scripts/ralph/prd.json` (R-004 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (59 tests total).
+- **Learnings for future iterations:**
+  - `from Module import name` inside a function can be stubbed by installing a `types.ModuleType` into `sys.modules` via `monkeypatch.setitem("Module", stub)`. This is the cleanest way to mock PyObjC without actually touching macOS APIs.
+  - To exercise the ImportError path on a local `from X import sym` inside a function, install a stub module that is *missing* `sym`. That raises `ImportError` (not `AttributeError`) because `from-import` specifically surfaces missing names as ImportError.
+  - `AXIsProcessTrustedWithOptions` must be invoked with `kAXTrustedCheckOptionPrompt: False` to suppress the system prompt. Tests assert this option is set on the passed dict — do not relax it, or `check_permissions()` could start surfacing the system prompt during polling.
+  - The canonical ordering of permissions in `get_missing_permissions_error()` matters for UI consistency — tests lock it in.
+  - Ralph's sandbox may have PyObjC installed (on darwin) but not have the permissions granted, so a real call to `_check_input_monitoring()` may legitimately return False there. Do not write tests that assume True without the framework-level mock.
+---
+
+## 2026-04-22 - R-005
+- Added `services/recorder/src/recorder/event_tap.py` exposing `EventTap` — a passive global CGEventTap running its own `CFRunLoop` on a dedicated `threading.Thread`.
+  - `kCGHIDEventTap` + `kCGEventTapOptionListenOnly` (never modifies events).
+  - Event mask covers left/right/other mouse down+up, key down+up, flags changed, scroll wheel. Mouse-moved (type 5) is deliberately excluded to keep storage sane.
+  - Normaliser `_normalise_event(code, event, quartz)` produces a JSON-friendly dict with `cg_event_type`, `timestamp_ms`, `location_{x,y}`, `modifiers` (decoded from CGEventFlags), `flags_raw`, and per-type `key_code` / `scroll_delta_{x,y}` fields. Each framework call is individually try/except'd so a PyObjC failure on one field does not drop the whole event.
+  - `handle_cg_event(code, event)` detects `kCGEventTapDisabledByTimeout` / `kCGEventTapDisabledByUserInput` (both unsigned 0xFFFFFFFE/0xFFFFFFFF and signed -2/-1 forms) and re-arms via `CGEventTapEnable(tap, True)`, surfacing a synthetic `{"cg_event_type": "tap_reenabled", "reason": ...}` dict through the callback.
+  - `start(start_timeout=5.0)` blocks until the tap thread has created+enabled the tap (or fails with a clear `RuntimeError` — permission-denied case when `CGEventTapCreate` returns NULL is called out in the error string). `stop()` disables the tap, calls `CFRunLoopStop`, and joins with a 2s timeout; idempotent.
+  - Consumer callback exceptions are logged and swallowed — one buggy consumer never tears down capture (belt-and-suspenders for the session orchestrator).
+- Added `tests/recorder/test_event_tap.py` (17 hermetic tests + 1 opt-in macOS integration test):
+  - Event mask coverage assertions.
+  - `_modifiers_from_flags` empty / combined / unknown-bits-ignored.
+  - `_normalise_event` for click / key_down / scroll / unknown type / framework-raises.
+  - `handle_cg_event` delivery, reenable-on-timeout, reenable-on-user-input (signed form), suppression while stopping, callback-exception isolation.
+  - `start/stop` round trip via a stubbed Quartz whose `CFRunLoopRun` blocks on a `threading.Event` until `CFRunLoopStop` sets it.
+  - Start-twice raises; tap-create returning NULL raises a permission-referencing RuntimeError.
+  - `@pytest.mark.macos test_macos_real_tap_receives_synthesised_click` posts a synthetic CGEvent and asserts delivery (skipped by default; opt-in via `TRACE_RUN_MACOS_TESTS=1`).
+- Added `tests/recorder/conftest.py` auto-skip for the `macos` marker unless `TRACE_RUN_MACOS_TESTS=1`, and `tests/recorder/README.md` documenting how a human grants Accessibility / Input Monitoring / Screen Recording permissions and runs the macOS tests.
+- Registered the `macos` marker in root `pyproject.toml` so pytest does not warn on unknown markers.
+- Files changed:
+  - `services/recorder/src/recorder/event_tap.py` (new)
+  - `tests/recorder/test_event_tap.py` (new)
+  - `tests/recorder/conftest.py` (added macOS skip hook)
+  - `tests/recorder/README.md` (new)
+  - `pyproject.toml` (macos marker declaration)
+  - `scripts/ralph/prd.json` (R-005 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (76 passed, 1 skipped — the opt-in macOS test).
+- **Learnings for future iterations:**
+  - CoreGraphics constants like `kCGEventTapDisabledByTimeout` are declared `uint32_t` but PyObjC may surface them as signed ints on some macOS/PyObjC combinations. Match both `0xFFFFFFFE` and `-2` (and `0xFFFFFFFF` / `-1`). Same trick will apply to any CoreFoundation constant where PyObjC's type coercion is surprising.
+  - A CGEventTap is inert until `CGEventTapEnable(tap, True)` runs AND the tap's run-loop source is attached to a live CFRunLoop. `CGEventTapCreate` returning non-NULL does not mean events will flow. Tests that just check the return value are not enough; the run-loop must be spun.
+  - Running `CFRunLoopRun()` on a non-main thread works for event taps (we do not need the main CFRunLoop). `CFRunLoopGetCurrent()` returns the per-thread loop; attaching the tap source there is what routes events.
+  - In the Ralph sandbox, `CGEventPost` does not deliver through the tap even when the tap reports "enabled" — so a real-delivery integration test must be opt-in (TRACE_RUN_MACOS_TESTS=1). Attempting to assert delivery in Ralph will always fail.
+  - When stubbing Quartz for `start()`/`stop()`, you must provide: `CGEventTapCreate`, `CFMachPortCreateRunLoopSource`, `CFRunLoopGetCurrent`, `CFRunLoopAddSource`, `CFRunLoopRemoveSource`, `CGEventTapEnable`, `CFRunLoopRun` (blocking), `CFRunLoopStop` (releases the block), plus the `kCGHIDEventTap` / `kCGHeadInsertEventTap` / `kCGEventTapOptionListenOnly` / `kCFRunLoopCommonModes` sentinels. See `_install_runloop_stub_quartz` in test_event_tap.py for the pattern — reuse when adding CFRunLoop-driven modules (focus_tracker NSWorkspace notifications, screen-capture streams).
+  - Mouse-moved events (CGEventType 5) are intentionally excluded from the mask. If a future story needs drag-path fidelity, add it there and document the storage cost; do not silently re-enable.
+---
+
+## 2026-04-22 - R-006
+- Added `services/recorder/src/recorder/ax_resolver.py` exposing `resolve_element_at(x, y, *, timeout_seconds=0.2) -> ResolvedTarget | None`.
+  - Runs the AX work on a short-lived daemon thread and blocks with `threading.Event.wait(timeout)` so a hung AX server can never hang the caller for more than the timeout. Returns `None` on timeout with a warning log.
+  - `_resolve_element_at_sync` calls `AXUIElementCreateSystemWide()` + `AXUIElementCopyElementAtPosition(system_wide, x, y, None)` → `(err, element)`; any non-zero error or null element returns None.
+  - `_build_target` collects role / title / description / identifier / position+size. If the hit has no title AND no description, `_walk_for_label` walks up to `MAX_ANCESTOR_DEPTH=3` parents via `AXParent` and adopts the first ancestor label (description too if co-located). The hit's own role / ax_identifier / frame are preserved — only the name is promoted.
+  - `_get_frame` tolerates three PyObjC value shapes: bridged tuple `(x, y)`, object with `.x/.y` or `.width/.height`, or raw `AXValueRef` unwrapped via `AXValueGetValue(value, kAXValueCG{Point,Size}Type, None) -> (success, unpacked)`.
+  - Every framework call is individually try/except'd; AX errors never escape the module (AC "never raises past the module boundary").
+  - `ResolvedTarget` TypedDict is schema-compatible — `frame` required, other fields nullable. If position+size extraction fails, the whole target is reported as None (AC "frame is always present when a target is returned").
+- Added `tests/recorder/test_ax_resolver.py` (16 hermetic tests + 1 opt-in macOS integration):
+  - Happy-path structured return, miss → None, AX error code → None, missing frame → None, ImportError on ApplicationServices → None.
+  - Missing optional fields become `None` (not empty string) in the returned dict.
+  - Ancestor walk: promotes parent label at depth-1, stops exactly at MAX_ANCESTOR_DEPTH=3, skipped when hit already has a label, skipped when hit has only a description.
+  - Timeout: a slow `AXUIElementCreateSystemWide` stub that sleeps 0.5s is cancelled inside a 0.05s budget.
+  - Error isolation: framework-raises and attribute-copy-raises return None cleanly.
+  - Frame unpacking: attribute-bearing objects (`.x/.y` / `.width/.height`), AXValueRef+AXValueGetValue `(True, unpacked)` path.
+  - `@pytest.mark.macos test_macos_real_resolve_hits_finder_menu_bar` resolves screen (2, 2) — the Apple menu — on a real Mac with Accessibility granted.
+- Files changed:
+  - `services/recorder/src/recorder/ax_resolver.py` (new)
+  - `tests/recorder/test_ax_resolver.py` (new)
+  - `scripts/ralph/prd.json` (R-006 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (92 passed, 2 skipped — the opt-in macOS tests for event_tap + ax_resolver).
+- **Learnings for future iterations:**
+  - `AXUIElementCopyAttributeValue(element, attr, None)` returns `(error, value)` in PyObjC. Always check error != 0 OR value is None — both mean "not available". Tests should model the same convention so the code path for "attribute missing" is actually exercised.
+  - PyObjC may surface CGPoint/CGSize as either a native tuple, a bridged object with `.x`/`.y` / `.width`/`.height`, or as an opaque `AXValueRef` that needs `AXValueGetValue(value, kAXValueCGPointType, None)` — which itself returns `(success, unpacked)` on PyObjC. Handle all three shapes; real-world AX responses differ per macOS version and per target app.
+  - Bounded-time AX work: `threading.Thread` + `Event.wait(timeout)` is sufficient and simpler than `concurrent.futures` for fire-and-forget short calls. The thread is daemon, so if it stays stuck on a misbehaving AX server, it just dies with the process instead of leaking. Do NOT use `thread.join(timeout)` alone as the signal — on timeout the returned thread is still alive and you cannot distinguish "finished" from "dead" without a separate sentinel. Use a `threading.Event` set in a `finally` block.
+  - The resolver preserves the HIT element's role/identifier/frame and only borrows the parent's label when walking — the click coordinate's semantic position should not change just because we found a nicer name.
+  - When adopting `str()` on an AX value, handle empty strings: they should be treated as "unknown" (returned as None). AX often reports empty strings rather than nil for missing titles, and passing an empty label downstream confuses synthesis prompts.
+---
+
+## 2026-04-22 - R-007
+- Added `services/recorder/src/recorder/focus_tracker.py` exposing `FocusTracker` plus `AppInfo`, `AppFocusHistoryEntry`, `AppSwitchPayload`, `WindowFocusPayload` TypedDicts.
+  - `start()` subscribes to `NSWorkspaceDidActivateApplicationNotification` via `notificationCenter().addObserverForName_object_queue_usingBlock_(…, self._ns_workspace_block)` and seeds current state from `NSWorkspace.frontmostApplication()` if available. Raises on double-start; `stop()` is idempotent and calls `removeObserver_` with the handle returned from subscribe.
+  - `handle_app_activated(app)` is the public seam tests/orchestrator use to drive state without going through a notification; the block path converts the NSNotification userInfo → `AppInfo` dict and calls into the same state machine.
+  - Window title resolved via `AXUIElementCreateApplication(pid)` + `AXFocusedWindow` + `AXTitle`. Only queried on app-change transitions and on explicit `refresh_window_title()` — never on a timer, matching the PRD note. Empty titles are reported as `None`.
+  - Callbacks (`on_app_switch`, `on_window_focus_change`) fire outside the state lock; consumer exceptions are logged and swallowed so one bad listener never tears down tracking.
+  - Maintains `app_focus_history` with `entered_at` / `exited_at` ISO timestamps — `stop()` finalises the last entry. History is returned as a defensive copy so callers can't mutate internal state.
+- Added `tests/recorder/test_focus_tracker.py` (24 hermetic + 1 opt-in macOS integration):
+  - State machine: first-activation-from-none, subsequent switches carry `from_*`, reactivation same app is a no-op, history entries finalised in order, `stop()` finalises the tail, callback exception is isolated.
+  - Window title: refresh only fires on change, None-title doesn't spam callbacks, refresh-before-activation is safe, AX raises / ImportError / create-returns-None all degrade to `None`.
+  - NSWorkspace plumbing: `start()` adds exactly one observer for the right notification name, `stop()` removes it, `start()` twice raises, AppKit ImportError keeps the tracker usable via `handle_app_activated`, stored block delivers via a fake notification, missing userInfo is a safe no-op, `frontmostApplication()` seeds state at start.
+  - Helper coverage: `_extract_app_info` via both `.get` and `objectForKey_` paths; `_ns_running_app_to_dict` rejects missing pid and converts empty fields to empty strings.
+  - `@pytest.mark.macos test_macos_real_app_switch_fires_callback` drives two real apps via `osascript` on a real Mac; skipped by default.
+- Files changed:
+  - `services/recorder/src/recorder/focus_tracker.py` (new)
+  - `tests/recorder/test_focus_tracker.py` (new)
+  - `scripts/ralph/prd.json` (R-007 passes=true)
+  - `scripts/ralph/progress.txt` (added NSWorkspace + NSDictionary patterns to Codebase Patterns)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (116 passed, 3 skipped — the opt-in macOS tests for event_tap, ax_resolver, focus_tracker).
+- **Learnings for future iterations:**
+  - `addObserverForName_object_queue_usingBlock_` is friendlier than the selector-based pattern for PyObjC interop — the block is just a Python callable and PyObjC handles the bridging. Use this whenever you need to observe an `NSNotificationCenter` without introducing an NSObject subclass.
+  - NSDictionary bridging is not guaranteed: some PyObjC versions bridge `userInfo()` to a plain dict, others hand back an NSDictionary with only Objective-C accessors. Check for `.get` first (bridged) and fall back to `objectForKey_` (ObjC) — see `_extract_app_info`.
+  - Empty-string AX values should collapse to `None` at the module boundary. Otherwise downstream code has to repeatedly special-case `""` as "no title available" and it becomes easy to emit a `window_focus` event with a useless empty title.
+  - When writing a test stub that needs to emulate "forced ObjC path" (no Python `.get`), do NOT set `user_info.get = None` on a dict subclass — calling a None later raises TypeError inside the caught `except Exception` and the whole extraction silently returns None. Instead define a separate minimal class that exposes only `objectForKey_`.
+  - The focus tracker owns `app_focus_history` for metadata.json. The session orchestrator (R-010) should call `focus_tracker.get_app_focus_history()` right before `writer.close()` (which rewrites metadata with stopped_at) so the last entry's `exited_at` is populated. `FocusTracker.stop()` also finalises the tail so it's safe either way, but calling `stop()` before grabbing the history is cleanest.
+---
+
+## 2026-04-22 - R-008
+- Added `services/recorder/src/recorder/text_aggregator.py` exposing `TextAggregator` + `resolve_focused_field` helper + `TextInputEvent` TypedDict + `BACKSPACE_KEY_CODE` / `FORWARD_DELETE_KEY_CODE` / `IDLE_TIMEOUT_SECONDS` module constants.
+  - `TextAggregator` buffers typed characters per (app_bundle_id, field_key). `set_focus(app, key, label)` is the session-orchestrator seam — it flushes the previous field's buffer before swapping to the new one, matching the AC "field-switch flushes previous field first".
+  - Fallback to app-level buffering: if `field_key` is None, the aggregator synthesises `field_key = f"app:{app_bundle_id}"` so AX-poor apps (Electron) still get their text captured instead of dropped.
+  - `handle_key_event(event)` accepts the normalised dict shape from `recorder.event_tap` augmented with a `chars` field (Unicode string for the keystroke). Keeping the CGEvent→chars translation in the session orchestrator means tests drive the aggregator with synthetic dicts — no PyObjC required.
+  - Pure shortcut chords (cmd/ctrl/opt held) silently skip the buffer. Shift and fn do NOT suppress — shifted characters arrive via `chars` already. Per-AC, backspace (keycode 51) and forward-delete (keycode 117) pop the last character; backspace on an empty buffer is a no-op.
+  - Idle timer: `threading.Timer` that gets cancelled and replaced on each keystroke; on fire, auto-flushes under the same lock as `flush()`/`stop()` so there are no races between the timer thread, the event-tap thread, and the focus-tracker thread.
+  - `flush()` / `stop()` are idempotent. Empty buffers never emit a text_input event (AC explicit). Consumer callback exceptions are logged and swallowed — same pattern as EventTap / FocusTracker.
+  - `resolve_focused_field(pid, *, timeout_seconds=0.2)` wraps `AXUIElementCreateApplication(pid)` + `AXFocusedUIElement` + `AXRole/AXIdentifier/AXTitle/AXDescription` with the same bounded-thread + `threading.Event` timeout pattern as `ax_resolver.resolve_element_at`. Returns `(None, None)` for non-text roles, missing AX, or timeout. When no identifier is present the key folds in the role and label so re-focusing the same field is idempotent.
+- Added `tests/recorder/test_text_aggregator.py` (31 hermetic tests):
+  - Focus / flush: basic flush, no-focus noop, empty-buffer suppression, field switch, app switch, bundle_id=None clears focus, re-focus same field keeps buffer + refreshes label, app-level fallback (field_key=None).
+  - Keystroke handling: backspace & forward-delete, backspace on empty buffer, cmd/ctrl/opt parametrized suppression, shift/fn allowed, unfocused keystrokes dropped, non-string `chars` ignored.
+  - Idle timer: auto-flush after timeout, timer reset on new keystroke, `stop()` flushes and blocks future events, `stop()` without focus safe, emit-exception isolation, invalid idle_timeout rejected at construction.
+  - `resolve_focused_field`: happy path, non-text role returns None, description-fallback builds `role:X:label:Y` synthetic key, no-identifier-no-label yields `role:X` key + None label, AX error returns None, missing ApplicationServices import returns None, timeout respected (worker started then aborted), null app element short-circuits.
+- Files changed:
+  - `services/recorder/src/recorder/text_aggregator.py` (new)
+  - `tests/recorder/test_text_aggregator.py` (new)
+  - `scripts/ralph/prd.json` (R-008 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (147 passed, 3 skipped — the opt-in macOS tests for event_tap, ax_resolver, focus_tracker).
+- **Learnings for future iterations:**
+  - The session orchestrator (R-010) must feed `TextAggregator.handle_key_event` an event dict that INCLUDES a `chars` field. `recorder.event_tap` does NOT populate `chars` today — it stops at `key_code`. The session (or a thin adapter in front of `handle_key_event`) is responsible for calling `CGEventKeyboardGetUnicodeString` on the raw CGEventRef to fill in `chars`. Document this at the session layer; do NOT retrofit chars into event_tap — the aggregator's test surface assumes it can stay pure.
+  - Modifier names are **event_tap style** (`"command"`, `"control"`, `"option"`, `"shift"`, `"fn"`, `"caps_lock"`) — NOT the schema enum style (`"cmd"`, `"ctrl"`, `"opt"`, `"shift"`, `"fn"`). Translation happens at the session layer when building the schema-valid keypress event. Every consumer of `event_tap` output needs to do this translation; pick one place (the session) to own it.
+  - `threading.Timer` is fine for the idle flush: it fires in its own thread, we acquire the aggregator's `RLock`, and flush. The RLock lets flush()/stop() work while a Timer callback is pending (vs. a plain Lock where a re-entrant flush would deadlock).
+  - When cancelling a Timer via `t.cancel()`, a race is still possible — the Timer may have already crossed the "actually fire" threshold before cancel runs. Defensive pattern: the `_on_idle` handler checks `self._stopped` and acquires the lock before doing anything. If a late-firing timer lands after `stop()`, it's just a no-op.
+  - Re-focusing the SAME (app, field_key) must NOT flush — the session orchestrator will re-call `set_focus` opportunistically (e.g., after every click, which may re-resolve the same focused field). If re-focus flushed, text mid-sentence would be prematurely split into two text_input events.
+  - The synthetic `app:<bundle_id>` fallback key is deliberately distinct from any real AX identifier — a real AX identifier will never contain a colon-prefixed "app:" segment that matches a bundle id. If that ever collides in practice, hash the bundle id instead.
+---
+
+## 2026-04-22 - R-009
+- Added `services/recorder/src/recorder/screenshot.py` exposing `capture_main_display() -> bytes | None`, `get_main_display_info() -> DisplayInfo | None`, and a public `PNG_MAGIC` sentinel.
+  - `capture_main_display()` calls `Quartz.CGWindowListCreateImage(CGRectInfinite, kCGWindowListOptionOnScreenOnly, kCGNullWindowID, kCGWindowImageDefault)` and encodes the resulting CGImage via `AppKit.NSBitmapImageRep.alloc().initWithCGImage_(…).representationUsingType_properties_(4, None)` — `4` is `NSBitmapImageFileTypePNG`. Every framework step is wrapped in try/except and logged at warning level; the function never raises past the module boundary.
+  - Guards against: missing `Quartz`/`AppKit` imports, absent `kCGWindow*` sentinels, `CGWindowListCreateImage` returning None (Screen Recording denial), `NSBitmapImageRep.initWithCGImage_` returning None, a non-PNG byte result (final magic-prefix sanity check).
+  - `get_main_display_info()` uses `AppKit.NSScreen.mainScreen().frame()` (points) + `backingScaleFactor()` (Retina) — returns `None` if either is unreadable or non-positive. This is what `metadata.json.display_info` will be seeded from by the session orchestrator (R-010).
+- Added `services/recorder/src/recorder/keyframe_policy.py` exposing `KeyframePolicy` + `PERIODIC_INTERVAL_SECONDS=5.0` / `POST_CLICK_DELAY_SECONDS=0.1` / `KEYFRAME_REASONS` constants.
+  - Stateless decision gate: `should_capture(event_type, seconds_since_last_keyframe) -> bool` + `reason_for(…) -> str | None`. The caller (session orchestrator) tracks wall-clock + timer; policy just answers yes/no + canonical reason.
+  - Triggers: `"tick"` → `"periodic"` iff elapsed >= 5s; `"app_switch"` / `"pre_click"` / `"post_click"` → always capture with that reason; anything else → no.
+  - Constructor validates `periodic_interval_seconds > 0` and `post_click_delay_seconds >= 0` so a misconfigured session can't silently disable periodic keyframes.
+- Added `tests/recorder/test_screenshot.py` (17 hermetic + 1 opt-in macOS):
+  - Happy path round-trips a synthesised 8x8 PNG through stubbed Quartz+AppKit; asserts canonical `CGWindowListCreateImage` args + `NSBitmapImageRep.representationUsingType_properties_(4, None)` call.
+  - Error branches: `Quartz` missing (`sys.modules["Quartz"] = None` → ImportError), `AppKit` missing, `CGWindowListCreateImage` returning None, `CGWindowListCreateImage` raising, sentinels missing, bitmap init returning None, bitmap returning no PNG data, bitmap returning non-PNG bytes.
+  - `get_main_display_info`: Retina (2.0 scale), non-Retina (1.0), NSScreen=None, AppKit ImportError, `frame()` raising, zero-width dims, zero scale factor.
+  - `@pytest.mark.macos test_macos_real_capture_produces_valid_png` captures the real main display, parses the IHDR chunk, and asserts pixel dims ≈ `display_info.width * scale_factor` within 1 pixel of slack (Retina sanity).
+- Added `tests/recorder/test_keyframe_policy.py` (21 tests):
+  - Defaults + schema-enum pin (`KEYFRAME_REASONS` matches the payload enum).
+  - Constructor validation rejects non-positive intervals and negative post-click delay.
+  - Periodic: fires at 5.0s exactly, exceeds, stays quiet below threshold, at zero; custom 1.0s interval respected.
+  - `app_switch` / `pre_click` / `post_click` fire unconditionally (elapsed-agnostic).
+  - Unknown event_types (`click`, `keypress`, `scroll`, `text_input`, `window_focus`, `tap_reenabled`, empty string, wrong-case `"TICK"`) all return False.
+- Files changed:
+  - `services/recorder/src/recorder/screenshot.py` (new)
+  - `services/recorder/src/recorder/keyframe_policy.py` (new)
+  - `tests/recorder/test_screenshot.py` (new)
+  - `tests/recorder/test_keyframe_policy.py` (new)
+  - `scripts/ralph/prd.json` (R-009 passes=true)
+  - `scripts/ralph/progress.txt` (added stateless-policy + PyObjC-ClassVar + Pillow-free PNG patterns)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (184 passed, 4 skipped — the opt-in macOS tests for event_tap, ax_resolver, focus_tracker, screenshot).
+- **Learnings for future iterations:**
+  - `CGWindowListCreateImage` returning non-None does NOT mean Screen Recording permission is granted — some macOS versions return a black frame instead of None on denial. The PNG magic check at the end of the pipeline catches the truly malformed case, but you can't distinguish "denied" from "transient failure" from return value alone. The session orchestrator should call `permissions.check_permissions()` at `start()` time, not trust the capture return value.
+  - `NSBitmapImageFileTypePNG` has raw value `4` in modern AppKit. `NSPNGFileType` (the older symbol) was deprecated; do not re-import it. Bind the literal once in the module as `_NS_BITMAP_FILE_TYPE_PNG` so there's a single place to update if Apple ever rev's it.
+  - `NSScreen.mainScreen().backingScaleFactor()` is the most reliable Retina-detector — simpler than `CGDisplayPixelsWide / CGDisplayBounds.size.width`. Use it for the `display_info.scale_factor` field.
+  - When stubbing a PyObjC `cls.alloc().init…_(…)` two-step in tests, create a fresh subclass per test via `type("NSBitmapImageRep", (Base,), {...})` so class-level state (the "next PNG bytes to return", the shared `rep_calls` list) doesn't leak between tests. Declaring `ClassVar[list[...]] = []` on a base class directly will be flagged by ruff RUF012 AND will bleed state across tests.
+  - Keep keyframe policy stateless. The session orchestrator (R-010) will own: `last_keyframe_time`, the periodic `threading.Timer`, the post-click delayed capture (use `threading.Timer(0.1, …)`). The policy is pure — `reason = policy.reason_for(kind, time.monotonic() - last)` — no race conditions, no test-only time injection needed inside the policy.
+  - Do NOT add Pillow just to validate PNGs in tests. `b"\\x89PNG\\r\\n\\x1a\\n"` + the IHDR chunk format (`length(4) + "IHDR" + width(4) + height(4) + …`) is enough to crc-check + dimension-check with `struct` and `zlib`.
+  - Post-click keyframe delay (`POST_CLICK_DELAY_SECONDS = 0.1`) is owned by the policy constants but enforced by the session via `threading.Timer`. If you need to tighten it in tests, pass a shorter `post_click_delay_seconds` to `KeyframePolicy` rather than monkey-patching the module constant.
+---
+
+## 2026-04-23 - R-010
+- Landed `services/recorder/src/recorder/session.py` — `RecordingSession` orchestrator wiring EventTap + FocusTracker + TextAggregator + keyframe policy + screenshot capture into a single `TrajectoryWriter`.
+  - Every macOS-dependent dependency (EventTap, FocusTracker, TextAggregator, ax_resolver, screenshot_capturer, display_info_provider, permissions_check, KeyframePolicy) is injected via constructor kwarg — defaults come from the real recorder modules, tests inject hermetic fakes.
+  - Two locks: `_start_stop_lock` serialises start()/stop() bookkeeping; `_lock` guards seq + writer.append_event + last-keyframe-time + the pending post-click-timer list. Capture-thread callbacks bail early when `_active` is False so `stop()` can tear down components without holding `_lock`.
+  - Click envelope: pre-click keyframe → AX resolve (outside the lock — can take up to 200ms) → click schema event → post-click keyframe scheduled via `threading.Timer(post_click_delay_seconds)`. Delay=0 fires synchronously, which keeps hermetic tests deterministic.
+  - Periodic keyframes run on a dedicated daemon thread polling `_stop_event.wait(max(0.05, min(0.5, interval/2)))` and calling `KeyframePolicy.should_capture("tick", elapsed)` under the lock.
+  - Event translation: event_tap's long-form modifier names (`"command"`) are mapped to schema enum short forms (`"cmd"`) by `_translate_modifiers`. `_CLICK_BUTTON_BY_TYPE` converts `left_mouse_down` / `right_mouse_down` / `other_mouse_down` → `left` / `right` / `other`. Shortcut chords (cmd/ctrl/opt held) skip the TextAggregator and emit a schema `keypress`; non-shortcut keys go to the aggregator.
+  - Scroll handling picks direction by |dx| vs |dy|, emits `{direction, delta}`; zero-delta scrolls are dropped silently.
+  - `text_input` events override the `app` field with the bundle_id the text buffer was attached to (not the currently focused app) — matches the TextAggregator's ownership model. Empty buffers never emit (aggregator drops them, session also defends).
+  - App switches clear the TextAggregator focus (`set_focus(to_bundle_id, None, None)`) so keystrokes after the switch start a fresh buffer. `app_switch` payload omits `from_*` keys when None to keep JSONL tidy, rather than writing explicit `null` keys.
+  - `window_focus` events drop empty/None titles before emit — otherwise synth prompts get littered with useless `""` titles.
+  - `stop()` is idempotent, returns the cached summary on subsequent calls. `duration_ms` is computed from `time.monotonic()` (wall-clock independent). `trajectory_id` stays queryable after stop via `self._summary`. Session is single-shot per the PRD — double-start raises `SessionAlreadyActiveError`.
+  - `_finalise_metadata` rewrites `metadata.json` with `focus_tracker.get_app_focus_history()` before `writer.close()` runs its own `stopped_at` pass — so history + stopped_at co-resident in the final file.
+  - Three new exceptions: `SessionAlreadyActiveError`, `SessionNotActiveError`, `PermissionsMissingError` (carries the structured `PermissionsError` dict for the HTTP layer to return verbatim).
+- Added `tests/recorder/test_session.py` (24 hermetic tests):
+  - Lifecycle: start creates trajectory+metadata, start-twice / single-shot / stop-without-start / idempotent-stop raise correctly, permissions-missing → PermissionsMissingError with zero disk leak.
+  - Click envelope: pre-click keyframe + AX-resolved click + post-click keyframe with zero-pad screenshots written; AX returns None / AX raises / screenshot returns None / screenshot raises all handled without dropping the click.
+  - Periodic keyframes: with a 50ms policy interval, sleeping 250ms yields ≥2 periodic keyframes.
+  - Scroll direction picks dominant axis; zero-delta dropped.
+  - Shortcut vs non-shortcut: shortcut → schema keypress with `modifiers` + `keys`; non-shortcut → forwarded to TextAggregator; empty text_input buffer suppressed.
+  - App switch: writes schema app_switch + keyframe, clears aggregator focus, from_* fields omitted when None.
+  - Window focus empty title ignored, tap_reenabled surfaces schema event with `cause`.
+  - Metadata: `stopped_at` finalised, `app_focus_history` populated via FocusTracker handoff; fallback `{width:1,height:1,scale:1.0}` when provider returns None.
+  - Concurrency: 5 threads × 20 scroll events give 100 monotonically-increasing, unique seq values.
+  - Late callbacks after stop are silent no-ops; `with session:` context manager auto-stops on exit.
+- Files changed:
+  - `services/recorder/src/recorder/session.py` (moved from untracked → tracked + lint cleanup)
+  - `tests/recorder/test_session.py` (new)
+  - `scripts/ralph/prd.json` (R-010 passes=true)
+  - `scripts/ralph/progress.txt` (this entry)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (208 passed, 4 skipped; opt-in macOS tests for event_tap, ax_resolver, focus_tracker, screenshot).
+- **Learnings for future iterations:**
+  - The session owns the **only** `seq` counter in the recorder. The writer's own auto-seq counter is still in place (belt-and-suspenders) but every session emit passes a pre-assigned seq under `_lock`. If a future story (R-011 API, R-014 e2e) emits events via a path that does NOT go through the session, that path MUST either acquire the same lock or accept that seqs may interleave.
+  - `post_click_delay_seconds=0.0` makes the post-click keyframe synchronous — use this in hermetic tests so the expected event order is deterministic. Real sessions use 0.1s (a `threading.Timer`).
+  - When mocking the capture layer, the Fake FocusTracker MUST also implement `stop()` side-effects (finalising the last history entry's `exited_at`) if the test re-reads metadata.json and asserts on `exited_at`. The real FocusTracker does this in `stop()`; tests that skip this invariant silently pass `exited_at=None` into the metadata and then fail downstream.
+  - `screenshot_ref` in events.jsonl uses the ZERO-PADDED seq (4 digits) — the schema pattern `^screenshots/\d{4,}\.png$` allows ≥4 digits so sessions >9999 events still validate. The session uses `f"screenshots/{seq:04d}.png"` which matches both the writer's `write_screenshot` padding and the schema pattern.
+  - Dual-lock layout: a coarse `_start_stop_lock` for lifecycle + a fine `_lock` for per-event state. Do NOT fold them into one — `start()` and `stop()` spend non-trivial time stopping threads and joining; holding that time on the per-event lock would starve capture callbacks.
+  - For the HTTP layer (R-011): `PermissionsMissingError.error` is a dict that already matches the expected 403 response body; forward it directly. `SessionAlreadyActiveError` → 409; `SessionNotActiveError` → 409.
+---
+
+## 2026-04-23 - R-011
+- Added `services/recorder/src/recorder/storage.py` exposing `default_trajectories_root()`, `ensure_trajectories_root()`, `trajectory_dir()`, `remove_trajectory()`. Resolves prod (`Trace`) vs dev (`Trace-dev`) profile via `TRACE_DEV_MODE=1`; tests pin a `tmp_path` via `TRACE_PROFILE_DIR`. Creates the root with perms `0700` (best-effort `chmod` swallows OSError on filesystems that don't support it).
+- Rewrote `services/recorder/src/recorder/api.py` from the scaffolding stub into the R-011 surface:
+  - `RecorderState` owns the on-disk root + the at-most-one `RecordingSession`. Single `threading.Lock` serialises start/stop/status/active_trajectory_id so two simultaneous `POST /recorder/start` calls cannot create two sessions.
+  - Two routers exported: `router` (mounted under `/recorder` by the gateway, owns `start`/`stop`/`status`) and `trajectories_router` (mounted at root, owns `GET/DELETE /trajectories[/{id}]` plus `GET /trajectories/{id}/screenshots/{filename}`).
+  - `POST /recorder/start` returns 200 `{trajectory_id}`, 409 on `SessionAlreadyActiveError`, **403 with the structured `PermissionsError` dict** on `PermissionsMissingError` (forwarded verbatim — the dict is already the body the UI expects).
+  - `POST /recorder/stop` returns 200 `{trajectory_id, event_count, duration_ms}` or 409.
+  - `GET /trajectories` filesystem-scans the root: skips dirs without metadata or with corrupt JSON (a future R-012 SQLite index will replace this scan); each item carries `id, label, started_at, stopped_at, duration_ms, event_count`.
+  - `GET /trajectories/{id}` returns full `metadata + events + screenshots` (screenshots are fully-qualified URLs built from `request.base_url`).
+  - `DELETE /trajectories/{id}`: 409 if it's the active recording, 404 if missing, 200 `{deleted}` on success.
+  - `GET /trajectories/{id}/screenshots/{filename}`: served via `FileResponse` instead of `StaticFiles` mount so Ralph doesn't need a long-lived directory at app startup. `_safe_screenshot_path` rejects `..`, `.`, empty, slashes, backslashes, and non-`.png` filenames + path-resolves against the trajectory dir to defeat any traversal that survives URL normalisation.
+- `Depends(get_recorder_state)` is bound once at module level as `StateDep` and reused as the default — keeps ruff `B008` happy without losing FastAPI DI semantics.
+- `gateway/main.py` includes both `recorder_router` (prefix `/recorder`) and `trajectories_router` (no prefix) so trajectory paths land at `/trajectories/...` per the PRD AC.
+- `tests/recorder/test_api.py` (33 tests): drives the FastAPI app via `httpx.AsyncClient` + `ASGITransport` (no real socket); `FakeSession` writes a real on-disk trajectory via `TrajectoryWriter` (so list/get/delete operate on real files) but never touches PyObjC. Coverage:
+  - `/recorder/status` idle / after-start / after-stop.
+  - `/recorder/start` happy / empty body / 409 already-recording / 403 permissions-missing with structured body.
+  - `/recorder/stop` summary / 409 not-recording.
+  - `/trajectories` empty / one-recording / skips dirs without metadata / direct unit test for malformed metadata.
+  - `/trajectories/{id}` full payload / 404.
+  - `DELETE /trajectories/{id}` happy / 404 / 409 active.
+  - `/trajectories/{id}/screenshots/{filename}` happy / 404 missing / 404 non-png suffix.
+  - Direct unit tests for `_safe_screenshot_path` covering `..`, `.`, empty, `..\\metadata.json`, etc. (URL normalisation by httpx swallows these before they reach the handler — the helper's safety still has to be locked in).
+  - `RecorderState` unit tests: creates root dir, idle status, start/stop round-trip, double-start raises, **8-thread concurrent start barrier yields exactly 1 success + 7 `SessionAlreadyActiveError`** (locks the locking).
+- Verified `uv run uvicorn gateway.main:app --host 127.0.0.1 --port <port>` boots cleanly and serves `/healthz`, `/recorder/status`, `/trajectories`.
+- Files changed:
+  - `services/recorder/src/recorder/storage.py` (new)
+  - `services/recorder/src/recorder/api.py` (rewritten)
+  - `gateway/main.py` (mount second router)
+  - `tests/recorder/test_api.py` (new)
+  - `scripts/ralph/prd.json` (R-011 passes=true)
+  - `scripts/ralph/progress.txt` (this entry + Codebase Patterns updates)
+- Quality gates: `uv run ruff check services/recorder tests/recorder gateway`, `uv run mypy --strict services/recorder gateway`, `uv run pytest tests/recorder/` — all pass (241 passed, 4 skipped — the opt-in macOS tests for event_tap/ax_resolver/focus_tracker/screenshot).
+- **Learnings for future iterations:**
+  - For FastAPI dependencies, **bind `Depends(...)` to a module-level constant** (`StateDep = Depends(get_recorder_state)`) and reuse it as each endpoint's default. ruff `B008` rejects `Depends(...)` written inline in the signature, but FastAPI inspects the default for a `Depends` instance regardless — this is the canonical workaround.
+  - `app.dependency_overrides[get_recorder_state] = lambda: state` is the correct test seam — do NOT mutate the module-level `_STATE` global in tests because pytest-asyncio reruns dependencies on every request and global mutation leaks across tests.
+  - When `httpx.AsyncClient` sees `..` or `.` segments in a URL path, it normalises them BEFORE the request reaches the ASGI app. So HTTP-level "path traversal" tests are flaky/useless — instead unit-test the `_safe_screenshot_path` helper directly with raw filename strings. This pattern will recur for any future endpoint that takes a filename in the path.
+  - `TrajectoryWriter.close()` rewrites `stopped_at` to `now`. If a hermetic test wants deterministic `started_at`/`stopped_at` (e.g., to assert on `duration_ms`), call `close()` FIRST and then overwrite `metadata.json` with deterministic timestamps. Writing-then-closing-then-asserting is brittle.
+  - `RecorderState` exists as a separate object (NOT a singleton hard-coded into the router) precisely so tests can inject a `tmp_path`-rooted state per test. Future stories that need access to the state from outside the HTTP layer (e.g., R-012 index reconciliation at startup) should resolve it via `get_recorder_state()`, not import the module-level `_STATE`.
+  - The session-already-active check is at the `RecorderState` layer (with the lock), not at the router. The router's only job is to translate `SessionAlreadyActiveError`/`SessionNotActiveError`/`PermissionsMissingError` into 409/409/403 — keep this split when adding new endpoints (e.g. /recorder/abort), so the lock guarantees aren't bypassable from a different route.
+  - `PermissionsMissingError.error` is a plain dict (`PermissionsError` TypedDict) and is returned directly as the 403 body via `JSONResponse(status_code=403, content=dict(exc.error))`. Future modules (Synthesizer, Runner) that need similar structured-error responses should follow the same shape rather than re-inventing.
+  - Static screenshot serving uses `FileResponse` (per-request) instead of `StaticFiles` mount. This avoids requiring the trajectories directory to exist at app startup AND lets us enforce the path-safety check (`_safe_screenshot_path`) per request. If the asset volume ever justifies switching to `StaticFiles`, keep the safety check by mounting the dir at a different path and proxying through the safe handler.
+---
+
+## 2026-04-23 - R-012
+- Added `services/recorder/src/recorder/index_db.py` exposing `IndexDB` (SQLite, `check_same_thread=False` + `threading.Lock`) with `upsert`/`mark_closed`/`delete`/`get`/`list_all`/`ids`/`reconcile`/`close` and context-manager semantics. Schema matches R-012 AC: `trajectories(id PK, label, started_at, stopped_at, event_count NOT NULL DEFAULT 0, duration_ms)`. Uses `INSERT … ON CONFLICT(id) DO UPDATE` for upsert to keep it one SQL statement.
+- `reconcile(trajectories_root)` scans the root for directories with readable `metadata.json`, upserts a row derived from metadata + a line count of `events.jsonl`, and deletes any indexed id whose directory is missing. Returns `{added_or_updated, removed}` for logging.
+- `recorder.writer.TrajectoryWriter` now accepts an optional `index_db=` kwarg. Inserts a minimal row on construction (id + label), upserts on `write_metadata` (fills in started_at/stopped_at/duration_ms), and `mark_closed`-then-fallback-upserts on `close()`. All index writes are wrapped in `contextlib.suppress(Exception)` because the index is a cache, not authoritative — a cache blip must not break a live recording.
+- `recorder.session.RecordingSession` takes an `index_db=` kwarg and forwards it to the `TrajectoryWriter` it creates.
+- `recorder.api.RecorderState` now owns an `IndexDB` — auto-creates one at `<root>.parent/index.db` if none is passed, and calls `index_db.reconcile(root)` once on `__init__` so service startup heals any drift (AC #7).
+- `SessionFactory` signature changed to `Callable[[Path, IndexDB | None], RecordingSession]` so the state can inject its index into the session at start time. `_default_session_factory(root, index_db)` constructs `RecordingSession(root, index_db=index_db)`.
+- `GET /trajectories` reads from `state.index_db.list_all()` (AC #5). Removed dead helpers `_count_events`, `_duration_ms`, `_build_summary` from `api.py` — they were only used by the old filesystem-scan implementation.
+- `DELETE /trajectories/{id}` now also removes the index row; returns 404 iff neither the directory nor the row existed.
+- Added `recorder.storage.default_index_db_path()` returning `<profile>/index.db`. `get_recorder_state()` wires it through when constructing the default singleton.
+- Updated `tests/recorder/test_api.py::FakeSession` to accept and forward `index_db` (matches the new factory signature) and to upsert deterministic close-time values into the index so `list_trajectories` duration assertions stay stable.
+- Added `tests/recorder/test_index_db.py` (20 tests): file/parent creation, reopen persistence, upsert/get/replace, mark_closed happy+miss, delete (incl. double-delete), list ordering (by started_at with NULLs first), reconcile (add, remove-stale, ignore-non-trajectory-dirs, ignore-corrupt-metadata, missing root, event count refresh), TrajectoryWriter integration (insert on creation, update on close, no-op when index absent), concurrent upsert across 4 threads, and `default_index_db_path` follows TRACE_PROFILE_DIR.
+- Files changed:
+  - `services/recorder/src/recorder/index_db.py` (new)
+  - `services/recorder/src/recorder/writer.py`
+  - `services/recorder/src/recorder/session.py`
+  - `services/recorder/src/recorder/api.py`
+  - `services/recorder/src/recorder/storage.py`
+  - `tests/recorder/test_api.py` (FakeSession signature + index_db upsert in stop)
+  - `tests/recorder/test_index_db.py` (new)
+  - `scripts/ralph/prd.json` (R-012 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (261 tests, 4 skipped macOS-only).
+- **Learnings for future iterations:**
+  - `sqlite3.connect(..., check_same_thread=False)` + a `threading.Lock` is enough for the recorder's access pattern (one writer thread, one HTTP reader). Do NOT reach for an ORM — the whole module is ~200 lines and a single `CREATE TABLE IF NOT EXISTS` migration.
+  - `INSERT … ON CONFLICT(id) DO UPDATE SET` is cleaner than `INSERT OR REPLACE` when you want the new row's non-key fields to take precedence and the existing row's other fields to stay untouched. Prefer it over the SQLite-specific `REPLACE` semantics.
+  - `ORDER BY started_at IS NULL DESC, started_at ASC, id ASC` puts in-progress rows (NULL started_at) at the top of the list — useful because those are the ones the user cares about most.
+  - When converting `try/except/pass` to `contextlib.suppress(Exception)`, ruff `SIM105` flags the former AND `RUF100` flags any `# noqa: BLE001` that was there because `BLE001` is not enabled in this repo's ruff config. Don't add `# noqa: BLE001` pre-emptively.
+  - `mypy --strict` is happy with the `SessionFactory = Callable[[Path, IndexDB | None], RecordingSession]` signature only if `IndexDB` is imported at module top level in `api.py` (not in `TYPE_CHECKING` — Callable definitions at module scope are evaluated at import time).
+  - Recording tests where `started_at` is a fixed future date (e.g., "2026-04-23T12:00:00.000+00:00") will produce a NEGATIVE `duration_ms` through `TrajectoryWriter.close()` because close writes `stopped_at = now()`. Assert presence, not sign — or overwrite the index row post-close with deterministic values.
+---
+
+## 2026-04-23 - R-013
+- Added the five reference-workflow trajectory fixtures under `fixtures/trajectories/{gmail_reply, calendar_block, finder_organize, slack_status, notes_daily}/`. Each fixture has a schema-valid `metadata.json`, an `events.jsonl` with 11–12 events (including at minimum 1 click-with-AX-target, 1 text_input with field_label, 1 app_switch), and a `screenshots/` directory with tiny structurally-valid PNG keyframes. Total fixtures directory: ~150 KB (well under the 5 MB cap).
+- Added `scripts/generate_synthetic_fixtures.py` — a deterministic Python synthesizer that validates every event/metadata via `recorder.schema` before writing. Hand-crafted per-workflow event scripts use short helpers (`_click`, `_text_input`, `_app_switch`, `_keyframe`, …) so the event lists stay flat and human-readable. `seq` / `timestamp_ms` are assigned post-hoc from `BASE_EPOCH_MS` so the events list can be reordered without renumbering by hand.
+- Added `scripts/regenerate_fixtures.sh` — human-only checklist documenting how to re-record the five workflows live and copy the real trajectory directories into `fixtures/trajectories/<slug>/` during smoke testing. It also points at the synthetic fallback for Ralph/CI.
+- Added `tests/recorder/test_fixtures.py` (36 tests): directory layout, metadata validity, per-event schema validity, monotonic 1-indexed seq, R-013 per-fixture minimums (click+target / text_input+label / app_switch), every `screenshot_ref` resolves to a valid PNG on disk, and the 5 MB total-size cap.
+- Updated `tests/recorder/README.md` with a "Reference-workflow fixtures" section describing the synthetic-vs-real split and the regeneration command.
+- Files changed:
+  - `scripts/generate_synthetic_fixtures.py` (new)
+  - `scripts/regenerate_fixtures.sh` (new, executable)
+  - `fixtures/trajectories/{gmail_reply, calendar_block, finder_organize, slack_status, notes_daily}/{metadata.json, events.jsonl, screenshots/*.png}` (new)
+  - `tests/recorder/test_fixtures.py` (new)
+  - `tests/recorder/README.md`
+  - `scripts/ralph/prd.json` (R-013 passes=true)
+- Quality gates: `uv run ruff check services/recorder tests/recorder scripts/`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (297 tests, 4 skipped macOS-only).
+- **Learnings for future iterations:**
+  - When synthesizing PNGs inline (no Pillow), reuse the `PNG_MAGIC + IHDR + IDAT + IEND` recipe already used in `tests/recorder/test_screenshot.py::_make_min_png` rather than inventing another variant. ~60 bytes per PNG keeps 40+ synthetic keyframes comfortably inside the 5 MB fixtures cap.
+  - Ruff's `RUF001` flags en-dash (`–`) in string literals. Use plain hyphen (`-`) in synthesized fixture labels — no reason to invite the difference.
+  - Ruff's `RUF007` prefers `itertools.pairwise(xs)` over `zip(xs, xs[1:], strict=False)` for successive-pair iteration. Reach for `itertools.pairwise` by default.
+  - The synthesizer must bootstrap `sys.path` to include `services/recorder/src` so `from recorder.schema import …` works when run as a plain `python scripts/…` script (without `uv run`). `uv run python scripts/generate_synthetic_fixtures.py` is the canonical form but the path insert keeps direct invocation working too.
+  - `validate_event(...)` from `recorder.schema` is cheap (cached validator under the hood) — call it per-event inside the synthesizer so a schema bump never lands in fixtures silently.
+---
+
+## 2026-04-23 - R-015
+- Authored `tests/recorder/smoke.md` — human-run checklist covering the 5 reference workflows (gmail_reply, calendar_block, finder_organize, slack_status, notes_daily), a kill-tap resilience test, a permission-denial test, aggregate storage-sanity checks, and a Sign-off section with `_____` placeholders.
+- Added a pre-promise guard to `scripts/ralph/CLAUDE.md`: on `feat/recorder`, Ralph must scan `tests/recorder/smoke.md` for `_____` placeholders in the Sign-off section. If any remain, Ralph prints `awaiting human smoke test` instead of emitting `<promise>COMPLETE</promise>`.
+- Flipped `R-015.passes` to `true` in `scripts/ralph/prd.json`. All 15 recorder stories now pass their automated AC; the human smoke sign-off is the one remaining runtime gate between the branch and the promise.
+- Files changed:
+  - `tests/recorder/smoke.md` (new)
+  - `scripts/ralph/CLAUDE.md`
+  - `scripts/ralph/prd.json` (R-015 passes=true; R-014 passes=true staged from prior iteration)
+  - `tests/recorder/test_e2e.py` (staged from prior iteration)
+- Quality gates: `uv run ruff check services/recorder tests/recorder`, `uv run mypy --strict services/recorder`, `uv run pytest tests/recorder/` — all pass (298 tests, 4 skipped macOS-only).
+- **Learnings for future iterations:**
+  - The pre-promise guard lives in `scripts/ralph/CLAUDE.md` as a textual check against a literal `_____` placeholder — do NOT swap it for a YAML/front-matter sentinel later without also updating the guard text. The whole point is that the placeholder is visible in the rendered markdown so a human immediately sees what to fill in.
+  - Synthesizer/Runner branches will likely want their own analogous smoke.md + guard entry. Mirror this pattern rather than inventing a per-module gate shape: one markdown checklist per branch with a Sign-off section, one per-branch clause in the `Pre-promise guards` block of `scripts/ralph/CLAUDE.md`.
+  - The smoke checklist includes per-workflow minimums (event-count ranges, N clicks with AX targets, ≥1 text_input, ≥1 app_switch, ≥5 keyframes). These numbers are deliberately conservative — if a real recording consistently undershoots them, treat that as a signal the recorder missed events rather than a reason to lower the bar.
+  - `scripts/ralph/prd.json` now has every recorder story at `passes: true`. The branch's completion promise is gated exclusively on the human sign-off — do not add new stories here without bumping `R-015.priority` awareness, because the next automatable story would also block the promise indirectly.
 ---
