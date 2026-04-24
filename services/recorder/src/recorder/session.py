@@ -67,6 +67,7 @@ from recorder.text_aggregator import (
     TextAggregator,
     TextInputEmit,
     TextInputEvent,
+    resolve_focused_field,
 )
 from recorder.writer import TrajectoryWriter
 
@@ -530,7 +531,27 @@ class RecordingSession:
         text_aggregator = self._text_aggregator
         if text_aggregator is not None:
             try:
-                text_aggregator.set_focus(payload["to_bundle_id"], None, None)
+                # Best-effort AX lookup of the focused field for this app so
+                # ``text_input`` events carry a ``field_label`` (the smoke
+                # checklist requires ≥1 labelled text_input per workflow).
+                # ``resolve_focused_field`` is bounded by an internal
+                # 200ms timeout and returns ``(None, None)`` when AX can't
+                # resolve a text-like role — falling through gracefully.
+                field_key, field_label = None, None
+                tracker = self._focus_tracker
+                current = tracker.get_current_app() if tracker is not None else None
+                if current is not None:
+                    try:
+                        field_key, field_label = resolve_focused_field(
+                            current["pid"]
+                        )
+                    except Exception:
+                        logger.debug(
+                            "resolve_focused_field raised", exc_info=True
+                        )
+                text_aggregator.set_focus(
+                    payload["to_bundle_id"], field_key, field_label
+                )
             except Exception:
                 logger.exception("text_aggregator.set_focus raised on app switch")
         self._emit_keyframe("app_switch")
