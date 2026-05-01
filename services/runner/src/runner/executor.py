@@ -310,15 +310,20 @@ class Executor:
         )
         self._record_tier_decisions(resolved_skill)
 
-        # Step 3b: dispatch MCP-tier hints for non-destructive steps
-        # before the agent loop kicks off. The agent sees a primer
-        # user-message naming the steps that were already done so it
-        # can skip them. Destructive steps (in ``meta.destructive_steps``)
-        # remain observation-only — they need a confirmation flow that
-        # Step 3c will add. The dispatcher's session pool is opened/
-        # closed around the run loop; if no dispatcher is wired, the
-        # context manager is a no-op.
-        await self._pre_execute_mcp_steps(resolved_skill)
+        # Steps 3b/3c: dispatch MCP-tier hints before the agent loop
+        # kicks off. Non-destructive steps go through immediately;
+        # destructive ones queue a confirmation request and dispatch
+        # only on confirm. The agent sees a primer user-message naming
+        # everything that was already done so it can skip those steps.
+        # User abort during the destructive confirmation aborts the
+        # whole run (matches the prompt-tag flow's contract — there's
+        # no "abort just this step" path because that would leave the
+        # workflow inconsistent).
+        abort_decision = await self._pre_execute_mcp_steps(
+            resolved_skill, metadata
+        )
+        if abort_decision is not None:
+            return self._finalize_aborted(metadata, abort_decision)
 
         messages: list[Message] = []
         primer = self._build_mcp_primer_message(resolved_skill)
@@ -761,28 +766,32 @@ class Executor:
                 step_number=decision.step_number,
             )
 
-    async def _pre_execute_mcp_steps(self, resolved_skill: LoadedSkill) -> None:
-        """Run real MCP calls for non-destructive ``tier=mcp`` steps.
+    async def _pre_execute_mcp_steps(
+        self, resolved_skill: LoadedSkill, metadata: RunMetadata
+    ) -> ConfirmationDecision | None:
+        """Run real MCP calls for ``tier=mcp`` steps before the agent loop.
 
-        Walks every step number declared in ``meta.steps`` (in input
-        order). For each step whose resolved tier is ``mcp`` and which
-        is *not* listed in ``meta.destructive_steps``, performs the
-        substitution + ``tools/call`` round-trip. Successful results
-        are stashed on ``self._mcp_pre_executions`` for the primer
-        builder; both successes and failures are logged as
-        ``mcp_dispatched`` events so a human can audit what happened.
+        Walks every step number declared in ``meta.steps`` in input
+        order. For each step whose resolved tier is ``mcp``:
 
-        Failure modes are non-fatal: missing-parameter substitutions
-        or server errors just record the diagnostic and let the agent
-        loop drive the step via computer-use as usual. A run never
-        fails because of a flaky MCP server.
+        * Non-destructive: dispatch immediately, stash result for the
+          primer builder. Failures are logged but never abort the run.
+        * Destructive: queue a confirmation request and await the
+          user's decision. On confirm, dispatch and increment the run's
+          destructive-action counter. On abort or kill, return the
+          decision so the caller can finalize the run as ``aborted``
+          before the agent loop ever starts.
 
-        Destructive steps are deliberately *not* dispatched here. They
-        require the confirmation queue — Step 3c work.
+        Returns ``None`` when the run should proceed (every destructive
+        step was confirmed or none existed) or a :class:`ConfirmationDecision`
+        when the user aborted (or kill fired) and the caller must
+        finalize. Mirrors the prompt-tag flow's "abort = end the run"
+        contract — there's no "abort just this step" path because that
+        would leave the workflow in an inconsistent state.
         """
         dispatcher = self._mcp_dispatcher
         if dispatcher is None:
-            return
+            return None
         meta = resolved_skill.meta
         destructive = set(meta.get("destructive_steps") or [])
 
@@ -793,14 +802,6 @@ class Executor:
                 registry=self._capability_registry,
             )
             if decision.chosen is None or decision.chosen_tier != Tier.MCP:
-                continue
-            if step_number in destructive:
-                self._append_event(
-                    "mcp_skipped",
-                    f"step={step_number} destructive — "
-                    "Step 3c will add confirmation-aware MCP dispatch",
-                    step_number=step_number,
-                )
                 continue
 
             server = decision.chosen.get("mcp_server")
@@ -826,27 +827,140 @@ class Executor:
                 )
                 continue
 
-            result = await dispatcher.call(
-                server=server, function=function, arguments=arguments
+            is_destructive = step_number in destructive
+            if is_destructive:
+                user_decision = await self._confirm_mcp_destructive(
+                    metadata=metadata,
+                    step_number=step_number,
+                    server=server,
+                    function=function,
+                    arguments=arguments,
+                    skill=resolved_skill,
+                )
+                if user_decision.action != "confirm":
+                    self._append_event(
+                        "mcp_aborted",
+                        f"step={step_number} {server}.{function} "
+                        f"aborted_by_user reason="
+                        f"{user_decision.reason or USER_ABORT_REASON}",
+                        step_number=step_number,
+                    )
+                    return user_decision
+
+            await self._dispatch_one_mcp(
+                step_number=step_number,
+                server=server,
+                function=function,
+                arguments=arguments,
+                destructive=is_destructive,
             )
-            if result.ok:
-                self._mcp_pre_executions[step_number] = result
-                preview = (result.content_text or "").strip().replace("\n", " ")
-                if len(preview) > 160:
-                    preview = preview[:157] + "..."
-                self._append_event(
-                    "mcp_dispatched",
-                    f"step={step_number} {server}.{function} ok"
-                    + (f" → {preview}" if preview else ""),
-                    step_number=step_number,
-                )
-            else:
-                self._append_event(
-                    "mcp_failed",
-                    f"step={step_number} {server}.{function} error: "
-                    f"{result.error}",
-                    step_number=step_number,
-                )
+        return None
+
+    async def _confirm_mcp_destructive(
+        self,
+        *,
+        metadata: RunMetadata,
+        step_number: int,
+        server: str,
+        function: str,
+        arguments: dict[str, Any],
+        skill: LoadedSkill,
+    ) -> ConfirmationDecision:
+        """Push a confirmation request for a destructive MCP-tier step.
+
+        Mirrors the prompt-tag confirmation flow in
+        :meth:`_request_confirmation_via_prompt` but identifies the
+        request as ``mcp_destructive`` so the UI can render the
+        prospective tool call (server.function + args) instead of the
+        SKILL.md prose. Increments ``_confirmation_count``, switches
+        the run to ``awaiting_confirmation`` while we wait, and
+        flips back to ``running`` on confirm.
+        """
+        self._current_step = step_number
+        self._max_step_seen = max(self._max_step_seen, step_number)
+        self._confirmation_count += 1
+        step_text = _find_step_text(skill, step_number) or (
+            f"MCP {server}.{function}"
+        )
+        self._confirmation_queue.push_request(
+            run_id=self._run_id,
+            step_number=step_number,
+            step_text=step_text,
+            screenshot_ref=self._last_screenshot_ref(),
+            destructive_reason="mcp_destructive",
+        )
+        # Render a compact, log-friendly view of the prospective call
+        # so the audit trail records the exact server/function/args
+        # the user was asked to confirm.
+        arg_preview = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
+        if len(arg_preview) > 160:
+            arg_preview = arg_preview[:157] + "..."
+        self._append_event(
+            "confirmation_requested",
+            f"step={step_number} reason=mcp_destructive "
+            f"call={server}.{function}({arg_preview})",
+            step_number=step_number,
+        )
+        self._writer.update_status(
+            self._snapshot_metadata("awaiting_confirmation", ended_at=None),
+            status="awaiting_confirmation",
+            confirmation_count=self._confirmation_count,
+        )
+        decision = await self._await_decision_or_kill()
+        if decision.action == "confirm":
+            self._destructive_steps_executed.append(step_number)
+            self._append_event(
+                "confirmed",
+                f"step={step_number} reason=mcp_destructive",
+                step_number=step_number,
+            )
+            self._writer.update_status(
+                self._snapshot_metadata("running", ended_at=None),
+                status="running",
+            )
+        return decision
+
+    async def _dispatch_one_mcp(
+        self,
+        *,
+        step_number: int,
+        server: str,
+        function: str,
+        arguments: dict[str, Any],
+        destructive: bool,
+    ) -> None:
+        """Issue a single MCP ``tools/call`` and record the result.
+
+        Splits out so both the destructive-after-confirm path and the
+        non-destructive path use identical logging + result-stashing
+        semantics. ``destructive=True`` adds a marker to the event
+        message so the run log makes the distinction obvious.
+        """
+        dispatcher = self._mcp_dispatcher
+        assert dispatcher is not None  # guarded by caller
+
+        result = await dispatcher.call(
+            server=server, function=function, arguments=arguments
+        )
+        marker = " destructive" if destructive else ""
+        if result.ok:
+            self._mcp_pre_executions[step_number] = result
+            preview = (result.content_text or "").strip().replace("\n", " ")
+            if len(preview) > 160:
+                preview = preview[:157] + "..."
+            self._append_event(
+                "mcp_dispatched",
+                f"step={step_number}{marker} {server}.{function} ok"
+                + (f" → {preview}" if preview else ""),
+                step_number=step_number,
+            )
+        else:
+            self._append_event(
+                "mcp_failed",
+                f"step={step_number}{marker} {server}.{function} error: "
+                f"{result.error}",
+                step_number=step_number,
+            )
 
     def _build_mcp_primer_message(
         self, resolved_skill: LoadedSkill
