@@ -11,7 +11,12 @@ dependencies = [
     "pydantic>=2.8",
     "anthropic>=0.40",
     "jsonschema>=4.23",
+    # Server-Sent Events transport for the synthesizer's question-and-answer
+    # endpoints — see services/synthesizer/src/synthesizer/api.py.
+    "sse-starlette>=2.1",
     "trace-recorder",
+    "trace-synthesizer",
+    "trace-runner",
 ]
 
 [project.optional-dependencies]
@@ -22,6 +27,10 @@ dev = [
     "mypy>=1.11",
     "ruff>=0.6",
     "types-jsonschema>=4.23",
+    # respx mocks httpx clients (used to stub the Anthropic SDK in synth tests).
+    "respx>=0.21",
+    # pillow round-trips preview PNGs in synth's golden-fixture tests.
+    "pillow>=10",
 ]
 
 [tool.uv.workspace]
@@ -29,6 +38,8 @@ members = ["services/recorder", "services/synthesizer", "services/runner"]
 
 [tool.uv.sources]
 trace-recorder = { workspace = true }
+trace-synthesizer = { workspace = true }
+trace-runner = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -41,11 +52,23 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.isort]
 known-first-party = ["recorder", "synthesizer", "runner", "gateway"]
 
+[tool.ruff.lint.per-file-ignores]
+# draft_prompt.py / revise_prompt.py embed the full LLM system prompts as
+# multi-line strings; prose paragraphs regularly exceed 100 chars and
+# hard-wrapping them would only obscure what the model actually sees.
+# similarity.py contains long descriptive failure messages for snapshot diffs.
+"services/synthesizer/src/synthesizer/draft_prompt.py" = ["E501"]
+"services/synthesizer/src/synthesizer/revise_prompt.py" = ["E501"]
+"services/synthesizer/src/synthesizer/similarity.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
 files = ["services", "gateway"]
-mypy_path = "services/recorder/src"
+# Recorder + synthesizer both use a src/ layout; runner has a flat layout
+# that mypy finds via the package install. mypy_path lets the type checker
+# resolve the src-layout packages.
+mypy_path = "services/recorder/src:services/synthesizer/src"
 
 [[tool.mypy.overrides]]
 module = [
@@ -55,6 +78,7 @@ module = [
     "AppKit.*",
     "Foundation.*",
     "objc.*",
+    "respx.*",
 ]
 ignore_missing_imports = true
 

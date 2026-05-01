@@ -3,8 +3,38 @@ name = "trace-synthesizer"
 version = "0.1.0"
 description = "Trace Module 2: turns a trajectory into a SKILL.md via Claude."
 requires-python = ">=3.11"
+readme = "README.md"
 dependencies = [
     "fastapi>=0.115",
-    "pydantic>=2.8",
+    "uvicorn[standard]>=0.30",
     "anthropic>=0.40",
+    "jsonschema>=4.23",
+    "pydantic>=2",
+    "sse-starlette>=2.1",
 ]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "mypy>=1.11",
+    "ruff>=0.6",
+    "pillow>=10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/synthesizer"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/synthesizer"]
+
+[[tool.mypy.overrides]]
+module = ["anthropic.*", "jsonschema.*", "sse_starlette.*", "respx.*"]
+ignore_missing_imports = true

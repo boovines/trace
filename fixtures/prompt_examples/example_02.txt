@@ -1,0 +1,30 @@
+DIGEST:
+[1] t+0ms kind=app_switch: Switched to Finder
+[2] t+2100ms kind=click: Clicked file labeled "report.pdf" in Finder
+[3] t+3500ms kind=key_down: Pressed cmd+c in Finder
+[4] t+5800ms kind=click: Clicked folder labeled "Archive" in Finder
+[5] t+7200ms kind=key_down: Pressed cmd+v in Finder
+
+OUTPUT:
+{
+  "markdown": "# Archive a PDF in Finder\n\nCopies a named PDF from the current Finder window into the Archive folder using keyboard shortcuts.\n\n## Parameters\n\n- `filename` (string, required) — the PDF to archive\n\n## Preconditions\n\n- Finder is the active application\n- The Archive folder is visible in the current window\n\n## Steps\n\n1. Switch to Finder.\n2. Click the file named {filename}.\n3. Press Cmd+C to copy the file.\n4. Click the Archive folder.\n5. Press Cmd+V to paste the file into the Archive folder.\n\n## Expected outcome\n\nA copy of {filename} now exists inside the Archive folder.\n",
+  "meta": {
+    "slug": "archive_pdf",
+    "name": "Archive a PDF in Finder",
+    "trajectory_id": "00000000-0000-0000-0000-000000000000",
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "parameters": [
+      {"name": "filename", "type": "string", "required": true}
+    ],
+    "destructive_steps": [],
+    "preconditions": [
+      "Finder is the active application",
+      "The Archive folder is visible in the current window"
+    ],
+    "step_count": 5
+  },
+  "questions": [
+    {"id": "q1", "category": "parameterization", "text": "Does the filename vary between runs, or is it always the same file?"},
+    {"id": "q2", "category": "precondition", "text": "Should the skill verify the Archive folder exists before pasting, or assume it does?"}
+  ]
+}
