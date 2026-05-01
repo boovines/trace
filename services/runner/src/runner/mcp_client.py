@@ -36,9 +36,11 @@ import asyncio
 import json
 import logging
 import os
+import re
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +50,11 @@ from mcp.client.stdio import stdio_client
 from runner.execution_hints import CapabilityRegistry
 
 __all__ = [
+    "DEFAULT_CALL_TIMEOUT_SECONDS",
     "DEFAULT_PROBE_TIMEOUT_SECONDS",
+    "MCPCallDispatcher",
+    "MCPCallError",
+    "MCPCallResult",
     "MCPProbeError",
     "MCPProbeReport",
     "MCPServerConfig",
@@ -56,12 +62,25 @@ __all__ = [
     "load_server_configs",
     "probe_capabilities",
     "probe_capabilities_sync",
+    "substitute_parameters",
 ]
 
 LOGGER = logging.getLogger(__name__)
 
 #: How long to wait per server for its full initialize+list_tools handshake.
 DEFAULT_PROBE_TIMEOUT_SECONDS: float = 5.0
+
+#: Per-call timeout for ``MCPCallDispatcher.call``. Generous enough for
+#: real-world tools that touch the network; tight enough that a hung MCP
+#: doesn't stall the whole run.
+DEFAULT_CALL_TIMEOUT_SECONDS: float = 30.0
+
+
+# Pattern matching ``{name}`` references in MCP-hint argument values. Mirrors
+# the synthesizer's parameter identifier shape (1..30 chars, lowercase, must
+# start with a letter). Anchored so nested ``{{x}}`` JSON-template-style
+# tokens don't accidentally match.
+_PARAM_REF_RE = re.compile(r"\{([a-z][a-z0-9_]{0,29})\}")
 
 
 @dataclass(frozen=True)
@@ -361,3 +380,254 @@ def format_probe_report(report: MCPProbeReport) -> str:
 def _coerce_any(value: Any) -> Any:
     """Type-narrowing shim so ``Any`` returns from the SDK don't infect callers."""
     return value
+
+
+# --------------------------------------------------------------- substitution
+
+
+class MCPCallError(RuntimeError):
+    """Raised when an MCP call cannot be issued or the server returns an error.
+
+    Carries the original server + function names so the executor's event
+    log can name exactly which call failed.
+    """
+
+    def __init__(self, *, server: str, function: str, message: str) -> None:
+        super().__init__(f"MCP {server}.{function}: {message}")
+        self.server = server
+        self.function = function
+        self.detail = message
+
+
+def substitute_parameters(
+    arguments: Mapping[str, Any], parameters: Mapping[str, str]
+) -> dict[str, Any]:
+    """Replace ``{name}`` references in MCP-hint argument values.
+
+    The synthesizer emits hints like
+    ``{"to": "{recipient}", "body": "{reply_body}"}``. At dispatch time
+    those parameter references are resolved against the run's actual
+    parameter map. References to undeclared parameters raise
+    :class:`KeyError` with the missing name so the dispatcher can fall
+    through to the next tier rather than send a half-formed call.
+
+    String values get full substitution; non-string values pass through
+    unchanged. Nested dicts/lists also get recursively substituted.
+    """
+
+    def _replace_in_string(value: str) -> str:
+        def _sub(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name not in parameters:
+                raise KeyError(name)
+            return parameters[name]
+
+        return _PARAM_REF_RE.sub(_sub, value)
+
+    def _walk(value: Any) -> Any:
+        if isinstance(value, str):
+            return _replace_in_string(value)
+        if isinstance(value, list):
+            return [_walk(item) for item in value]
+        if isinstance(value, dict):
+            return {k: _walk(v) for k, v in value.items()}
+        return value
+
+    out: dict[str, Any] = {}
+    for key, value in arguments.items():
+        out[key] = _walk(value)
+    return out
+
+
+# ------------------------------------------------------------------ dispatch
+
+
+@dataclass(frozen=True)
+class MCPCallResult:
+    """Outcome of one ``tools/call`` invocation.
+
+    * ``ok`` — True when the server returned a non-error result.
+    * ``server`` / ``function`` — the call identity, for log lines.
+    * ``content_text`` — the textual content blocks concatenated; this
+      is what the executor injects into the agent's transcript so the
+      agent knows what came back. ``None`` when the result has no text
+      content.
+    * ``raw`` — the original ``CallToolResult`` for callers that need
+      structured access (e.g. parsing JSON-encoded tool output).
+    * ``error`` — error message when ``ok`` is False; ``None`` otherwise.
+    """
+
+    ok: bool
+    server: str
+    function: str
+    content_text: str | None
+    raw: Any
+    error: str | None = None
+
+
+class MCPCallDispatcher:
+    """Long-lived pool of MCP sessions for in-run tool calls.
+
+    Probe-time connections (in :func:`probe_capabilities`) are short
+    lived — open, list_tools, close. Dispatch-time connections need to
+    *stay open* across every call in a run so we don't pay the
+    initialize handshake on each step. This class owns one
+    :class:`ClientSession` per configured server and round-trips
+    ``tools/call`` requests through the matching session.
+
+    Lifecycle: instantiate, ``async with dispatcher:`` (opens all
+    sessions in parallel), do calls, exit the context (closes all
+    sessions). The :class:`Executor` enters the context once at run
+    start and exits when the run finishes. Servers that fail to open
+    are skipped silently — the dispatcher just refuses ``call(...)`` for
+    them (returns an error result), matching the probe layer's "one
+    bad MCP shouldn't sink the rest" stance.
+    """
+
+    def __init__(
+        self,
+        configs: list[MCPServerConfig],
+        *,
+        per_call_timeout: float = DEFAULT_CALL_TIMEOUT_SECONDS,
+    ) -> None:
+        self._configs = list(configs)
+        self._per_call_timeout = per_call_timeout
+        # Per-server async-context stack so we can open and close every
+        # connection in parallel as one async-context-managed unit.
+        self._sessions: dict[str, ClientSession] = {}
+        self._exit_callbacks: list[Any] = []
+
+    async def __aenter__(self) -> MCPCallDispatcher:
+        # Open every server's session in parallel. Sessions that fail to
+        # open are dropped from ``self._sessions`` and any subsequent
+        # ``call(server, ...)`` for them returns an error result.
+        async def _open(config: MCPServerConfig) -> tuple[str, Any] | None:
+            params = StdioServerParameters(
+                command=config.command,
+                args=list(config.args),
+                env={**os.environ, **dict(config.env)} if config.env else None,
+            )
+            try:
+                stdio_ctx = stdio_client(params)
+                read, write = await stdio_ctx.__aenter__()
+                session_ctx = ClientSession(read, write)
+                session = await session_ctx.__aenter__()
+                await session.initialize()
+            except Exception as exc:
+                LOGGER.warning(
+                    "MCP server %r connection failed: %s",
+                    config.name,
+                    exc,
+                )
+                return None
+            self._exit_callbacks.append((stdio_ctx, session_ctx))
+            return (config.name, session)
+
+        results = await asyncio.gather(
+            *(_open(c) for c in self._configs),
+            return_exceptions=True,
+        )
+        for entry in results:
+            if isinstance(entry, BaseException) or entry is None:
+                continue
+            name, session = entry
+            self._sessions[name] = session
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        # Close in reverse order so stdio_client's subprocess teardown
+        # mirrors its open. Never raise out of __aexit__ — server
+        # processes that crashed should be cleanly logged, not bubbled.
+        for stdio_ctx, session_ctx in reversed(self._exit_callbacks):
+            with suppress(Exception):
+                await session_ctx.__aexit__(None, None, None)
+            with suppress(Exception):
+                await stdio_ctx.__aexit__(None, None, None)
+        self._sessions.clear()
+        self._exit_callbacks.clear()
+
+    @property
+    def connected_servers(self) -> frozenset[str]:
+        """Names of servers whose ``initialize`` handshake succeeded."""
+        return frozenset(self._sessions.keys())
+
+    async def call(
+        self,
+        *,
+        server: str,
+        function: str,
+        arguments: Mapping[str, Any],
+    ) -> MCPCallResult:
+        """Invoke ``tools/call`` on a connected server.
+
+        Returns an :class:`MCPCallResult` whose ``ok`` flag mirrors the
+        server's ``isError`` response. Connection failures, timeouts,
+        and unknown servers all map to ``ok=False`` with a descriptive
+        ``error`` string — the executor's caller is expected to log the
+        error and fall through to the next tier rather than abort the
+        run.
+        """
+        session = self._sessions.get(server)
+        if session is None:
+            return MCPCallResult(
+                ok=False,
+                server=server,
+                function=function,
+                content_text=None,
+                raw=None,
+                error=(
+                    f"server {server!r} is not connected; "
+                    f"available: {sorted(self._sessions)}"
+                ),
+            )
+
+        try:
+            async with asyncio.timeout(self._per_call_timeout):
+                result = await session.call_tool(
+                    function,
+                    arguments=dict(arguments),
+                    read_timeout_seconds=timedelta(seconds=self._per_call_timeout),
+                )
+        except TimeoutError:
+            return MCPCallResult(
+                ok=False,
+                server=server,
+                function=function,
+                content_text=None,
+                raw=None,
+                error=f"call timed out after {self._per_call_timeout:.1f}s",
+            )
+        except Exception as exc:
+            return MCPCallResult(
+                ok=False,
+                server=server,
+                function=function,
+                content_text=None,
+                raw=None,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+        text_blocks: list[str] = []
+        for block in getattr(result, "content", []) or []:
+            text = getattr(block, "text", None)
+            if isinstance(text, str):
+                text_blocks.append(text)
+        content_text = "\n".join(text_blocks) if text_blocks else None
+
+        if getattr(result, "isError", False):
+            return MCPCallResult(
+                ok=False,
+                server=server,
+                function=function,
+                content_text=content_text,
+                raw=result,
+                error=content_text or "server returned isError without text",
+            )
+
+        return MCPCallResult(
+            ok=True,
+            server=server,
+            function=function,
+            content_text=content_text,
+            raw=result,
+        )
