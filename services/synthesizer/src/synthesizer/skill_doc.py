@@ -107,7 +107,15 @@ class Parameter(BaseModel):
 
 
 class Step(BaseModel):
-    """A single numbered step in a SKILL.md."""
+    """A single numbered step in a SKILL.md.
+
+    Execution metadata (intent + per-tier execution hints) lives in the
+    sibling ``skill.meta.json`` under ``steps[]``, not in this model — the
+    markdown round-trip ``parse_skill_md(render_skill_md(p)) == p`` is the
+    strongest invariant in this module and adding non-markdown fields to
+    :class:`Step` would break it. Helpers in :mod:`synthesizer.draft`
+    surface hints alongside parsed skills for downstream consumers.
+    """
 
     model_config = ConfigDict(frozen=True)
 

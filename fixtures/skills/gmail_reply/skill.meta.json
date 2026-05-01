@@ -28,5 +28,51 @@
     "Google Chrome is installed and signed into the target Gmail account.",
     "An unread message from {recipient_name} exists in the inbox."
   ],
-  "step_count": 5
+  "step_count": 5,
+  "steps": [
+    {
+      "number": 2,
+      "intent": "find_thread",
+      "execution_hints": [
+        {
+          "tier": "mcp",
+          "mcp_server": "gmail",
+          "function": "search_threads",
+          "arguments": {
+            "query": "from:{recipient_name} is:unread"
+          }
+        },
+        {
+          "tier": "computer_use",
+          "summary": "Click the most recent unread thread from {recipient_name} in the inbox list."
+        }
+      ]
+    },
+    {
+      "number": 5,
+      "intent": "send_email",
+      "execution_hints": [
+        {
+          "tier": "mcp",
+          "mcp_server": "gmail",
+          "function": "reply_to_thread",
+          "arguments": {
+            "thread_id": "{thread_id}",
+            "body": "{reply_body}",
+            "send": true
+          }
+        },
+        {
+          "tier": "browser_dom",
+          "url_pattern": "https://mail.google.com/",
+          "selector": "div[role='button'][data-tooltip*='Send']",
+          "action": "click"
+        },
+        {
+          "tier": "computer_use",
+          "summary": "Click the Send button at the bottom-left of the reply compose pane."
+        }
+      ]
+    }
+  ]
 }

@@ -79,6 +79,77 @@
     "step_count": {
       "type": "integer",
       "minimum": 1
+    },
+    "steps": {
+      "type": "array",
+      "description": "Optional per-step execution metadata. Each entry's number aligns with a 1-based step in SKILL.md's ## Steps section. Omitted entries (or an entirely absent steps array) tell the runner to fall through to computer-use for every step. Order independent: the runner indexes by step number.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "intent": {
+            "type": "string",
+            "description": "Short verb-phrase summary of what the step accomplishes (e.g. 'send_email', 'create_event', 'set_status'). Used by the runner to pick a hint when several apply."
+          },
+          "execution_hints": {
+            "type": "array",
+            "description": "Ordered execution candidates from most-preferred to least-preferred. The runner picks the first whose preconditions are satisfiable (MCP connected, browser focused, etc.).",
+            "items": { "$ref": "#/$defs/executionHint" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "executionHint": {
+      "type": "object",
+      "description": "A single execution candidate for one workflow step. The shape varies by tier; each tier-specific field is optional but the runner enforces presence at execution time.",
+      "additionalProperties": false,
+      "required": ["tier"],
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": ["mcp", "browser_dom", "computer_use"]
+        },
+        "mcp_server": {
+          "type": "string",
+          "description": "tier=mcp: catalog key from synthesizer.mcp_catalog.MCP_CATALOG."
+        },
+        "function": {
+          "type": "string",
+          "description": "tier=mcp: function name within the named server."
+        },
+        "arguments": {
+          "type": "object",
+          "description": "tier=mcp: argument map. Values may contain {param} substitutions matching declared parameters."
+        },
+        "url_pattern": {
+          "type": "string",
+          "description": "tier=browser_dom: URL the runner should navigate to (or verify) before acting. May contain {param} substitutions."
+        },
+        "selector": {
+          "type": "string",
+          "description": "tier=browser_dom: CSS selector or aria-label for the element to interact with."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["click", "type", "navigate", "scroll", "submit"],
+          "description": "tier=browser_dom: kind of DOM interaction."
+        },
+        "value": {
+          "type": "string",
+          "description": "tier=browser_dom: literal text or URL for the action (e.g. text to type, URL to navigate to). May contain {param} substitutions."
+        },
+        "summary": {
+          "type": "string",
+          "description": "tier=computer_use: human/agent-readable description for pixel-grounded fallback."
+        }
+      }
     }
   }
 }
