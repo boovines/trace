@@ -80,6 +80,13 @@ from runner.confirmation import (
 )
 from runner.coords import DryRunDisplayInfo, ImageMapping
 from runner.dispatcher import dispatch_tool_call
+from runner.execution_hints import (
+    CapabilityRegistry,
+    HintDecision,
+    default_capability_registry,
+    iter_step_numbers,
+    pick_hint,
+)
 from runner.execution_prompt import build_execution_prompt
 from runner.input_adapter import InputAdapter
 from runner.kill_switch import KillSwitch
@@ -184,6 +191,7 @@ class Executor:
         confirmation_timeout_seconds: float = DEFAULT_CONFIRMATION_TIMEOUT_SECONDS,
         kill_switch: KillSwitch | None = None,
         cost_warning_sink: CostWarningSink | None = None,
+        capability_registry: CapabilityRegistry | None = None,
     ) -> None:
         self._loaded_skill = loaded_skill
         self._parameters = dict(parameters)
@@ -201,6 +209,11 @@ class Executor:
         self._kill_event: asyncio.Event | None = None
         self._cost_warning_sink = cost_warning_sink
         self._cost_warning_emitted = False
+        self._capability_registry: CapabilityRegistry = (
+            capability_registry
+            if capability_registry is not None
+            else default_capability_registry()
+        )
 
         self._event_seq = 0
         self._screenshot_seq = 0
@@ -277,6 +290,7 @@ class Executor:
             f"run_started slug={metadata.skill_slug}",
             step_number=None,
         )
+        self._record_tier_decisions(resolved_skill)
 
         messages: list[Message] = []
         try:
@@ -690,6 +704,56 @@ class Executor:
             screenshot_seq=screenshot_seq,
         )
         self._event_seq += 1
+
+    def _record_tier_decisions(self, resolved_skill: LoadedSkill) -> None:
+        """Walk every step with hints and log which tier the runner picked.
+
+        Step 2 of the tiered-execution rollout is logging-only: we record
+        the decision into the run's event stream so downstream tools (and
+        humans) can see what the runner *would* dispatch once Steps 3
+        (real MCP) and 4 (Playwright DOM) ship. The actual action this
+        run takes still flows through the existing computer-use path.
+
+        Steps without ``meta.steps`` entries are silent — the runner just
+        falls through to the SKILL.md prose for them, same as before.
+        """
+        meta = resolved_skill.meta
+        for step_number in iter_step_numbers(meta):
+            decision = pick_hint(
+                step_number=step_number,
+                meta=meta,
+                registry=self._capability_registry,
+            )
+            self._append_event(
+                "tier_selected",
+                self._format_tier_decision(decision),
+                step_number=decision.step_number,
+            )
+
+    @staticmethod
+    def _format_tier_decision(decision: HintDecision) -> str:
+        """Render a HintDecision as a single-line event message."""
+        intent = decision.intent or "(no intent)"
+        if decision.chosen is None:
+            return (
+                f"step={decision.step_number} intent={intent} "
+                "tier=<none> - no supported execution hint and computer_use disabled"
+            )
+        tier = decision.chosen_tier.value if decision.chosen_tier else "<unknown>"
+        detail = ""
+        if tier == "mcp":
+            detail = (
+                f" mcp={decision.chosen.get('mcp_server')}."
+                f"{decision.chosen.get('function')}"
+            )
+        elif tier == "browser_dom":
+            detail = f" selector={decision.chosen.get('selector')!r}"
+        fell_back = " (fell_back=true)" if decision.fell_back else ""
+        synthetic = " synthetic" if decision.chosen.get("synthetic") else ""
+        return (
+            f"step={decision.step_number} intent={intent} "
+            f"tier={tier}{synthetic}{detail}{fell_back}"
+        )
 
     def _snapshot_metadata(
         self, status: str, *, ended_at: datetime | None
