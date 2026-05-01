@@ -221,3 +221,81 @@ def validate_meta_against_markdown(meta: dict[str, Any], markdown: str) -> None:
             f"in meta but not markdown: {only_meta_params}",
             "parameters",
         )
+
+    # ---- steps[].number bounds + hint shape ---------------------------
+    # ``steps`` is optional; absence means the runner falls through to
+    # computer-use for every step. When present, every entry must point
+    # at a real step number (1..len(numbered)) and any tier=mcp hints
+    # must reference a server/function declared in the MCP catalog.
+    meta_steps_raw = meta.get("steps") or []
+    seen_numbers: set[int] = set()
+    for i, entry in enumerate(meta_steps_raw):
+        if not isinstance(entry, dict):
+            _raise_cross_check(
+                f"steps[{i}] must be a JSON object, got {type(entry).__name__}",
+                f"steps/{i}",
+            )
+        num = entry.get("number")
+        if not isinstance(num, int) or num < 1 or num > len(numbered):
+            _raise_cross_check(
+                f"steps[{i}].number={num!r} is outside the valid range "
+                f"1..{len(numbered)} (markdown has {len(numbered)} steps)",
+                f"steps/{i}/number",
+            )
+        if num in seen_numbers:
+            _raise_cross_check(
+                f"duplicate steps[].number={num} — each step number may "
+                "appear at most once in meta.steps",
+                f"steps/{i}/number",
+            )
+        seen_numbers.add(num)
+        for j, hint in enumerate(entry.get("execution_hints") or []):
+            err = _validate_execution_hint(hint)
+            if err is not None:
+                _raise_cross_check(
+                    f"steps[{i}].execution_hints[{j}]: {err}",
+                    f"steps/{i}/execution_hints/{j}",
+                )
+
+
+def _validate_execution_hint(hint: Any) -> str | None:
+    """Return an error message if ``hint`` is malformed, else ``None``.
+
+    Tier-specific shape requirements (mcp needs server+function+arguments;
+    browser_dom needs selector+action; computer_use needs summary) are
+    enforced here because the JSON schema can only express it via a
+    fragile ``oneOf`` block. tier=mcp hints are also looked up against
+    :mod:`synthesizer.mcp_catalog` so the LLM can't hallucinate function
+    names that aren't on the wire.
+    """
+    from synthesizer.mcp_catalog import validate_hint as _validate_mcp_hint
+
+    if not isinstance(hint, dict):
+        return f"hint must be a JSON object, got {type(hint).__name__}"
+    tier = hint.get("tier")
+    if tier == "mcp":
+        for required in ("mcp_server", "function", "arguments"):
+            if required not in hint:
+                return f"tier=mcp hint missing {required!r}"
+        if not isinstance(hint["arguments"], dict):
+            return "tier=mcp hint.arguments must be an object"
+        catalog_err = _validate_mcp_hint(
+            server=hint["mcp_server"],
+            function=hint["function"],
+            arguments=hint["arguments"],
+        )
+        if catalog_err is not None:
+            return catalog_err
+        return None
+    if tier == "browser_dom":
+        for required in ("selector", "action"):
+            if required not in hint:
+                return f"tier=browser_dom hint missing {required!r}"
+        if hint["action"] in ("type", "navigate") and "value" not in hint:
+            return f"tier=browser_dom action={hint['action']!r} requires a 'value' field"
+        return None
+    if tier == "computer_use":
+        if "summary" not in hint:
+            return "tier=computer_use hint missing 'summary'"
+        return None
+    return f"unknown tier {tier!r}; expected mcp, browser_dom, or computer_use"

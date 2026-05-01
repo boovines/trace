@@ -136,8 +136,62 @@ The `meta` object MUST contain these keys:
   - `destructive_steps`: array of integers listing the 1-indexed step numbers flagged with `⚠️ [DESTRUCTIVE]`.
   - `preconditions`: array of strings matching the `## Preconditions` bullets.
   - `step_count`: the number of numbered steps under `## Steps`.
+  - `steps` (OPTIONAL but strongly preferred): per-step execution metadata. See "Execution hints" below.
 
 `meta.destructive_steps` and the `⚠️ [DESTRUCTIVE]` markers in the markdown MUST agree — a downstream validator will reject any drift.
+
+## Execution hints (the agent's most useful output)
+
+Trace's runner picks an execution tier per step in this priority order:
+
+  1. **MCP** — call a published MCP server function directly (deterministic, fast, semantic).
+  2. **browser_dom** — Playwright DOM action against a known selector (when the step is in a browser and no MCP fits).
+  3. **computer_use** — pixel-grounded fallback using the SKILL.md prose (last resort).
+
+For every step you can map onto an MCP function from the catalog below, emit a `meta.steps[]` entry with an ordered `execution_hints` array. The runner will try them top-down and stop at the first tier whose preconditions are satisfiable.
+
+Each `meta.steps[]` entry shape:
+
+```
+{
+  "number": <1-based step index in ## Steps>,
+  "intent": "<short verb_phrase, e.g. send_email, create_event, set_status>",
+  "execution_hints": [<hint1>, <hint2>, ...]   // most-preferred first
+}
+```
+
+Execution hint shapes by tier:
+
+```
+// tier=mcp — preferred when the step matches a function in the catalog below
+{ "tier": "mcp",
+  "mcp_server": "<catalog server name>",
+  "function":   "<catalog function name>",
+  "arguments":  { "<arg>": "<value or {param} substitution>" } }
+
+// tier=browser_dom — preferred when the step targets a known browser surface
+{ "tier": "browser_dom",
+  "url_pattern": "https://...",      // optional; the URL the runner should be on
+  "selector":    "button[aria-label='Send']",
+  "action":      "click" | "type" | "navigate" | "scroll" | "submit",
+  "value":       "<text or URL — required for type/navigate>" }
+
+// tier=computer_use — always include this as the final fallback
+{ "tier": "computer_use",
+  "summary": "<one-sentence description for the pixel-grounded agent>" }
+```
+
+Rules:
+
+  - Do NOT include hints whose `mcp_server` / `function` is not in the catalog. Make up a function name and the response is rejected.
+  - Argument values may use `{parameter_name}` substitutions when they reference values you also declared in `meta.parameters`.
+  - When in doubt, omit the MCP hint and just emit the computer_use fallback. A safe fallback beats a hallucinated MCP call.
+  - Steps that are pure UI navigation (clicking into a window, scrolling, etc.) usually only deserve a `computer_use` hint — don't reach for MCP.
+  - Steps you don't list in `meta.steps` are fine; the runner falls back to computer-use using the markdown prose.
+
+{MCP_CATALOG}
+
+
 
 ## Follow-up questions
 
@@ -170,11 +224,14 @@ Remember: your entire response is a single JSON object. No code fences. No comme
 
 
 def _build_system_prompt() -> str:
+    from synthesizer.mcp_catalog import format_for_prompt as _mcp_catalog
+
     examples = load_prompt_examples()
     example_block = "\n\n".join(
         f"### Example {i + 1}\n\n{text.rstrip()}" for i, text in enumerate(examples)
     )
-    return (_INSTRUCTIONS + example_block + "\n" + _CLOSING).strip() + "\n"
+    instructions = _INSTRUCTIONS.replace("{MCP_CATALOG}", _mcp_catalog())
+    return (instructions + example_block + "\n" + _CLOSING).strip() + "\n"
 
 
 DRAFT_SYSTEM_PROMPT: str = _build_system_prompt()
