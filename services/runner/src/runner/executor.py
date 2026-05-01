@@ -83,6 +83,7 @@ from runner.dispatcher import dispatch_tool_call
 from runner.execution_hints import (
     CapabilityRegistry,
     HintDecision,
+    Tier,
     default_capability_registry,
     iter_step_numbers,
     pick_hint,
@@ -90,6 +91,13 @@ from runner.execution_hints import (
 from runner.execution_prompt import build_execution_prompt
 from runner.input_adapter import InputAdapter
 from runner.kill_switch import KillSwitch
+from runner.mcp_client import (
+    MCPCallDispatcher,
+    MCPCallResult,
+)
+from runner.mcp_client import (
+    substitute_parameters as substitute_mcp_parameters,
+)
 from runner.parser import (
     ConfirmationRequest as ParserConfirmationRequest,
 )
@@ -192,6 +200,7 @@ class Executor:
         kill_switch: KillSwitch | None = None,
         cost_warning_sink: CostWarningSink | None = None,
         capability_registry: CapabilityRegistry | None = None,
+        mcp_dispatcher: MCPCallDispatcher | None = None,
     ) -> None:
         self._loaded_skill = loaded_skill
         self._parameters = dict(parameters)
@@ -214,6 +223,12 @@ class Executor:
             if capability_registry is not None
             else default_capability_registry()
         )
+        self._mcp_dispatcher: MCPCallDispatcher | None = mcp_dispatcher
+        # Pre-execution outcome map populated by _pre_execute_mcp_steps,
+        # keyed by step number → MCPCallResult. Read by the primer-message
+        # builder. Empty when no dispatcher was supplied or no steps had
+        # supported MCP hints.
+        self._mcp_pre_executions: dict[int, MCPCallResult] = {}
 
         self._event_seq = 0
         self._screenshot_seq = 0
@@ -237,6 +252,9 @@ class Executor:
                 return await self._run_killed_before_start()
 
         try:
+            if self._mcp_dispatcher is not None:
+                async with self._mcp_dispatcher:
+                    return await self._run_body()
             return await self._run_body()
         finally:
             if self._kill_switch is not None:
@@ -292,7 +310,20 @@ class Executor:
         )
         self._record_tier_decisions(resolved_skill)
 
+        # Step 3b: dispatch MCP-tier hints for non-destructive steps
+        # before the agent loop kicks off. The agent sees a primer
+        # user-message naming the steps that were already done so it
+        # can skip them. Destructive steps (in ``meta.destructive_steps``)
+        # remain observation-only — they need a confirmation flow that
+        # Step 3c will add. The dispatcher's session pool is opened/
+        # closed around the run loop; if no dispatcher is wired, the
+        # context manager is a no-op.
+        await self._pre_execute_mcp_steps(resolved_skill)
+
         messages: list[Message] = []
+        primer = self._build_mcp_primer_message(resolved_skill)
+        if primer is not None:
+            messages.append(primer)
         try:
             return await self._run_loop(
                 resolved_skill, system_prompt, messages, metadata
@@ -729,6 +760,149 @@ class Executor:
                 self._format_tier_decision(decision),
                 step_number=decision.step_number,
             )
+
+    async def _pre_execute_mcp_steps(self, resolved_skill: LoadedSkill) -> None:
+        """Run real MCP calls for non-destructive ``tier=mcp`` steps.
+
+        Walks every step number declared in ``meta.steps`` (in input
+        order). For each step whose resolved tier is ``mcp`` and which
+        is *not* listed in ``meta.destructive_steps``, performs the
+        substitution + ``tools/call`` round-trip. Successful results
+        are stashed on ``self._mcp_pre_executions`` for the primer
+        builder; both successes and failures are logged as
+        ``mcp_dispatched`` events so a human can audit what happened.
+
+        Failure modes are non-fatal: missing-parameter substitutions
+        or server errors just record the diagnostic and let the agent
+        loop drive the step via computer-use as usual. A run never
+        fails because of a flaky MCP server.
+
+        Destructive steps are deliberately *not* dispatched here. They
+        require the confirmation queue — Step 3c work.
+        """
+        dispatcher = self._mcp_dispatcher
+        if dispatcher is None:
+            return
+        meta = resolved_skill.meta
+        destructive = set(meta.get("destructive_steps") or [])
+
+        for step_number in iter_step_numbers(meta):
+            decision = pick_hint(
+                step_number=step_number,
+                meta=meta,
+                registry=self._capability_registry,
+            )
+            if decision.chosen is None or decision.chosen_tier != Tier.MCP:
+                continue
+            if step_number in destructive:
+                self._append_event(
+                    "mcp_skipped",
+                    f"step={step_number} destructive — "
+                    "Step 3c will add confirmation-aware MCP dispatch",
+                    step_number=step_number,
+                )
+                continue
+
+            server = decision.chosen.get("mcp_server")
+            function = decision.chosen.get("function")
+            raw_args = decision.chosen.get("arguments") or {}
+            if not isinstance(server, str) or not isinstance(function, str):
+                self._append_event(
+                    "mcp_skipped",
+                    f"step={step_number} malformed mcp hint "
+                    f"(server={server!r} function={function!r})",
+                    step_number=step_number,
+                )
+                continue
+
+            try:
+                arguments = substitute_mcp_parameters(raw_args, self._parameters)
+            except KeyError as exc:
+                self._append_event(
+                    "mcp_skipped",
+                    f"step={step_number} missing run parameter {{{exc.args[0]}}} "
+                    f"for {server}.{function}",
+                    step_number=step_number,
+                )
+                continue
+
+            result = await dispatcher.call(
+                server=server, function=function, arguments=arguments
+            )
+            if result.ok:
+                self._mcp_pre_executions[step_number] = result
+                preview = (result.content_text or "").strip().replace("\n", " ")
+                if len(preview) > 160:
+                    preview = preview[:157] + "..."
+                self._append_event(
+                    "mcp_dispatched",
+                    f"step={step_number} {server}.{function} ok"
+                    + (f" → {preview}" if preview else ""),
+                    step_number=step_number,
+                )
+            else:
+                self._append_event(
+                    "mcp_failed",
+                    f"step={step_number} {server}.{function} error: "
+                    f"{result.error}",
+                    step_number=step_number,
+                )
+
+    def _build_mcp_primer_message(
+        self, resolved_skill: LoadedSkill
+    ) -> Message | None:
+        """Build a primer user-message naming MCP-pre-executed steps.
+
+        Returns ``None`` when no steps were pre-executed. Otherwise the
+        agent's first turn sees a message like:
+
+            Steps 2, 3 have been pre-executed for you via MCP. Their
+            results are below — please skip those steps and continue
+            from step 4 in the SKILL.md.
+
+            Step 2 (gmail.search_threads):
+            <result text>
+
+        This is intentionally directive: the SKILL.md prose still
+        contains every step, but the primer tells the agent which
+        ones are done and what came back. The agent shouldn't redo
+        them.
+        """
+        if not self._mcp_pre_executions:
+            return None
+        executed = sorted(self._mcp_pre_executions)
+        next_step = max(executed) + 1
+        total_steps = int(resolved_skill.meta.get("step_count") or 0)
+        lines: list[str] = [
+            f"Steps {executed} have been pre-executed for you via MCP. "
+            f"Their results are below — please skip those steps and "
+            f"continue from step {next_step} in the SKILL.md."
+        ]
+        if total_steps and next_step > total_steps:
+            lines = [
+                f"Every step in the workflow ({executed}) was pre-executed "
+                "for you via MCP. Acknowledge completion with the workflow-"
+                "complete signal."
+            ]
+        for step_number in executed:
+            result = self._mcp_pre_executions[step_number]
+            content = (result.content_text or "(no content returned)").strip()
+            lines.append("")
+            lines.append(
+                f"Step {step_number} ({result.server}.{result.function}):"
+            )
+            # Truncate per-step content so the primer doesn't blow up
+            # the context for huge tool outputs. Full content stays in
+            # ``self._mcp_pre_executions`` for downstream tools that
+            # want it.
+            if len(content) > 1200:
+                content = content[:1200] + "\n...(truncated)"
+            lines.append(content)
+        text = "\n".join(lines)
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
 
     @staticmethod
     def _format_tier_decision(decision: HintDecision) -> str:

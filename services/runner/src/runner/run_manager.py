@@ -52,8 +52,11 @@ from runner.executor import Executor
 from runner.input_adapter import DryRunInputAdapter, InputAdapter
 from runner.kill_switch import KillSwitch, get_global_kill_switch
 from runner.mcp_client import (
+    MCPCallDispatcher,
     MCPProbeError,
+    MCPServerConfig,
     format_probe_report,
+    load_server_configs,
     probe_capabilities_sync,
 )
 from runner.observing_writer import ObservingRunWriter
@@ -271,6 +274,11 @@ class RunManager:
         self._mcp_config_path = mcp_config_path
         self._capability_registry: CapabilityRegistry | None = capability_registry
         self._capability_registry_lock = threading.Lock()
+        # MCP server configs are loaded lazily alongside the registry
+        # probe; the dispatcher (live during a run) needs them to open
+        # its own session pool. Cache them so we don't re-read disk per
+        # run.
+        self._mcp_server_configs: list[MCPServerConfig] | None = None
         self._runs: dict[str, RunHandle] = {}
         self._broadcaster = EventBroadcaster()
         self._background: _BackgroundLoop | None = None
@@ -301,7 +309,14 @@ class RunManager:
             if self._capability_registry is not None:
                 return self._capability_registry
             try:
-                report = probe_capabilities_sync(config_path=self._mcp_config_path)
+                from runner.mcp_client import default_config_path
+
+                config_path = self._mcp_config_path or default_config_path()
+                self._mcp_server_configs = load_server_configs(config_path)
+                report = probe_capabilities_sync(
+                    configs=self._mcp_server_configs,
+                    config_path=config_path,
+                )
             except MCPProbeError as exc:
                 logger.warning(
                     "MCP probe skipped (config error): %s — using "
@@ -309,6 +324,7 @@ class RunManager:
                     exc,
                 )
                 self._capability_registry = default_capability_registry()
+                self._mcp_server_configs = []
                 return self._capability_registry
             except Exception:
                 logger.exception(
@@ -316,12 +332,33 @@ class RunManager:
                     "computer-use-only registry"
                 )
                 self._capability_registry = default_capability_registry()
+                self._mcp_server_configs = []
                 return self._capability_registry
             logger.info(
                 "MCP probe complete:\n%s", format_probe_report(report)
             )
             self._capability_registry = report.registry
             return self._capability_registry
+
+    def _make_mcp_dispatcher(self) -> MCPCallDispatcher | None:
+        """Build a fresh dispatcher for one run, or ``None`` if no servers.
+
+        Sessions opened by the dispatcher live for the run; we make a
+        fresh dispatcher per run rather than sharing across runs so one
+        run's tool-call state can't leak into another's. Restricts to
+        servers that probed healthy — there's no point dialing a
+        known-broken server during a run.
+        """
+        # Force the registry probe to run first so configs are cached.
+        self._get_capability_registry()
+        configs = self._mcp_server_configs or []
+        if not configs:
+            return None
+        registry = self._capability_registry or default_capability_registry()
+        live = [c for c in configs if c.name in registry.mcp_servers]
+        if not live:
+            return None
+        return MCPCallDispatcher(live)
 
     def shutdown(self) -> None:
         """Stop the background loop. Idempotent; safe to skip in tests."""
@@ -514,6 +551,7 @@ class RunManager:
             kill_switch=self._kill_switch,
             cost_warning_sink=_publish_per_run_warning,
             capability_registry=self._get_capability_registry(),
+            mcp_dispatcher=self._make_mcp_dispatcher(),
         )
 
         async def _run_and_finalize() -> RunMetadata:
