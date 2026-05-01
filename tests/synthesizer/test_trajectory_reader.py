@@ -17,6 +17,7 @@ import shutil
 from pathlib import Path
 
 import pytest
+
 from synthesizer.trajectory_reader import (
     Event,
     TrajectoryReader,
@@ -67,8 +68,9 @@ def test_reads_reference_fixture(slug: str) -> None:
     assert summary["duration_ms"] > 0
     assert isinstance(summary["app_focus_history"], list)
     assert summary["app_focus_history"], "fixture should record at least one app focus"
-    # Every reference fixture includes exactly one keyframe screenshot.
-    assert summary["keyframe_count"] == 1
+    # Canonical R-013 fixtures emit several keyframes (periodic + pre/post-click);
+    # the original synth fixtures emitted just one. Accept either.
+    assert summary["keyframe_count"] >= 1
     # Every reference fixture starts with an app_switch event.
     assert summary["app_switch_count"] >= 1
 
@@ -87,8 +89,8 @@ def test_iter_events_by_type_filters() -> None:
     clicks = list(reader.iter_events_by_type("click"))
     assert all(isinstance(e, Event) for e in clicks)
     assert all(e.kind == "click" for e in clicks)
-    # gmail_reply has 2 clicks: Reply, Send
-    assert len(clicks) == 2
+    # gmail_reply has 3 clicks: an inbox row, then Reply and Send.
+    assert len(clicks) == 3
     labels = [e.target["label"] for e in clicks if e.target is not None]
     assert "Reply" in labels and "Send" in labels
 
@@ -96,9 +98,10 @@ def test_iter_events_by_type_filters() -> None:
 def test_summary_counts_match_fixture_content() -> None:
     reader = TrajectoryReader(FIXTURES_ROOT / "gmail_reply")
     summary = reader.summary()
-    # gmail_reply: 1 app_switch + 2 clicks + 1 text_input = 4 events
-    assert summary["event_count"] == 4
-    assert summary["click_count"] == 2
+    # The canonical R-013 gmail_reply fixture: 1 app_switch + 1 window_focus
+    # + 3 clicks + 1 keypress + 1 text_input + 4 keyframes = 11 events.
+    assert summary["event_count"] == 11
+    assert summary["click_count"] == 3
     assert summary["text_input_count"] == 1
     assert summary["app_switch_count"] == 1
 
@@ -134,9 +137,10 @@ def test_malformed_event_reports_line_and_seq(fixture_trajectory: Path) -> None:
     """A bad event line must surface both the line number AND the event seq."""
     events_path = fixture_trajectory / "events.jsonl"
     lines = events_path.read_text(encoding="utf-8").splitlines()
-    # Corrupt line 2 (seq=2) — remove the required 'kind' field.
+    # Corrupt line 2 (seq=2) — remove the required type/kind field.
     corrupted = json.loads(lines[1])
-    del corrupted["kind"]
+    corrupted.pop("type", None)
+    corrupted.pop("kind", None)
     lines[1] = json.dumps(corrupted)
     events_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -181,8 +185,8 @@ def test_blank_lines_in_events_are_skipped(fixture_trajectory: Path) -> None:
     events_path.write_text("\n\n" + body + "\n\n", encoding="utf-8")
 
     reader = TrajectoryReader(fixture_trajectory)
-    # gmail_reply: 4 real events; blank lines are ignored.
-    assert reader.summary()["event_count"] == 4
+    # gmail_reply (canonical R-013 fixture) has 11 events; blank lines are ignored.
+    assert reader.summary()["event_count"] == 11
 
 
 # --- Screenshots ---------------------------------------------------------

@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 from jsonschema import ValidationError
+
 from synthesizer.schema import (
     load_meta_schema,
     validate_meta,

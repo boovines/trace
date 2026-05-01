@@ -1,10 +1,19 @@
 {
-  "id": "b1a0f6f2-0001-4c00-8000-000000000001",
-  "started_at": "2026-04-22T14:00:00Z",
-  "stopped_at": "2026-04-22T14:00:30Z",
-  "label": "gmail_reply",
-  "display_info": { "width": 2560, "height": 1440, "scale": 2.0 },
+  "id": "11111111-1111-4111-8111-111111111111",
+  "label": "Reply to most recent unread email from Alice Smith",
+  "started_at": "2026-04-01T10:00:00.000+00:00",
+  "stopped_at": "2026-04-01T10:02:30.000+00:00",
+  "display_info": {
+    "width": 1440,
+    "height": 900,
+    "scale_factor": 2.0
+  },
   "app_focus_history": [
-    { "at": "2026-04-22T14:00:00Z", "bundle_id": "com.google.Chrome", "title": "Gmail - Inbox" }
+    {
+      "bundle_id": "com.google.Chrome",
+      "name": "Google Chrome",
+      "entered_at": "2026-04-01T10:00:00.000+00:00",
+      "exited_at": "2026-04-01T10:02:30.000+00:00"
+    }
   ]
 }

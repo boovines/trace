@@ -2,85 +2,305 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://trace.local/contracts/trajectory.schema.json",
   "title": "Trajectory",
-  "description": "A directory-shaped artifact produced by the Recorder. The schema below describes the contents of metadata.json and the per-line shape of events.jsonl.",
+  "description": "Locked contract for the Recorder's on-disk output. Describes the shape of metadata.json and each line of events.jsonl produced in a <uuid>/ trajectory directory.",
   "type": "object",
-  "definitions": {
-    "metadata": {
-      "type": "object",
-      "required": ["id", "started_at", "stopped_at", "label", "display_info", "app_focus_history"],
-      "properties": {
-        "id": { "type": "string", "format": "uuid" },
-        "started_at": { "type": "string", "format": "date-time" },
-        "stopped_at": { "type": "string", "format": "date-time" },
-        "label": { "type": "string" },
-        "display_info": {
-          "type": "object",
-          "required": ["width", "height", "scale"],
-          "properties": {
-            "width": { "type": "integer", "minimum": 1 },
-            "height": { "type": "integer", "minimum": 1 },
-            "scale": { "type": "number", "minimum": 0.1 }
-          }
-        },
-        "app_focus_history": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "required": ["at", "bundle_id", "title"],
-            "properties": {
-              "at": { "type": "string", "format": "date-time" },
-              "bundle_id": { "type": "string" },
-              "title": { "type": "string" }
-            }
-          }
-        }
-      }
+  "$defs": {
+    "isoDateTime": {
+      "type": "string",
+      "format": "date-time"
     },
-    "event": {
+    "frame": {
       "type": "object",
-      "required": ["seq", "t", "kind"],
+      "description": "Screen-point rectangle (not pixels). Retina-independent; use metadata.display_info.scale_factor to convert.",
+      "required": ["x", "y", "w", "h"],
       "properties": {
-        "seq": { "type": "integer", "minimum": 1, "description": "1-indexed sequence number; unique and strictly increasing within a trajectory." },
-        "t": { "type": "string", "format": "date-time" },
-        "kind": {
-          "type": "string",
-          "enum": [
-            "mouse_move",
-            "mouse_down",
-            "mouse_up",
-            "click",
-            "scroll",
-            "key_down",
-            "key_up",
-            "text_input",
-            "app_focus",
-            "app_switch",
-            "screenshot",
-            "annotation"
-          ]
-        },
         "x": { "type": "number" },
         "y": { "type": "number" },
-        "button": { "type": "string", "enum": ["left", "right", "middle"] },
-        "key": { "type": "string" },
+        "w": { "type": "number", "minimum": 0 },
+        "h": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "app": {
+      "type": "object",
+      "description": "The application that owned the event at capture time.",
+      "required": ["bundle_id", "name", "pid"],
+      "properties": {
+        "bundle_id": { "type": "string" },
+        "name": { "type": "string" },
+        "pid": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "target": {
+      "description": "Accessibility element resolved at the event coordinates. Null when no element could be resolved.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["frame"],
+          "properties": {
+            "role": { "type": ["string", "null"] },
+            "label": { "type": ["string", "null"] },
+            "description": { "type": ["string", "null"] },
+            "frame": { "$ref": "#/$defs/frame" },
+            "ax_identifier": { "type": ["string", "null"] }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "modifier": {
+      "type": "string",
+      "enum": ["cmd", "ctrl", "opt", "shift", "fn"]
+    },
+    "displayInfo": {
+      "type": "object",
+      "required": ["width", "height", "scale_factor"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "scale_factor": { "type": "number", "minimum": 0.1 }
+      },
+      "additionalProperties": false
+    },
+    "appFocusEntry": {
+      "type": "object",
+      "required": ["bundle_id", "name", "entered_at"],
+      "properties": {
+        "bundle_id": { "type": "string" },
+        "name": { "type": "string" },
+        "entered_at": { "$ref": "#/$defs/isoDateTime" },
+        "exited_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/isoDateTime" },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Contents of <uuid>/metadata.json.",
+      "required": ["id", "label", "started_at", "stopped_at", "display_info", "app_focus_history"],
+      "properties": {
+        "id": { "type": "string", "format": "uuid" },
+        "label": { "type": "string" },
+        "started_at": { "$ref": "#/$defs/isoDateTime" },
+        "stopped_at": {
+          "oneOf": [
+            { "$ref": "#/$defs/isoDateTime" },
+            { "type": "null" }
+          ]
+        },
+        "display_info": { "$ref": "#/$defs/displayInfo" },
+        "app_focus_history": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/appFocusEntry" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "eventBase": {
+      "type": "object",
+      "required": ["seq", "timestamp_ms", "type", "app", "payload"],
+      "properties": {
+        "seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1-indexed, monotonically increasing within a trajectory."
+        },
+        "timestamp_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Unix epoch milliseconds."
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "click",
+            "keypress",
+            "scroll",
+            "app_switch",
+            "window_focus",
+            "text_input",
+            "keyframe",
+            "tap_reenabled"
+          ]
+        },
+        "screenshot_ref": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^screenshots/\\d{4,}\\.png$"
+            },
+            { "type": "null" }
+          ]
+        },
+        "app": { "$ref": "#/$defs/app" },
+        "target": { "$ref": "#/$defs/target" },
+        "payload": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "clickPayload": {
+      "type": "object",
+      "required": ["button"],
+      "properties": {
+        "button": { "type": "string", "enum": ["left", "right", "middle", "other"] },
         "modifiers": {
           "type": "array",
-          "items": { "type": "string", "enum": ["cmd", "ctrl", "opt", "shift", "fn"] }
+          "items": { "$ref": "#/$defs/modifier" }
         },
-        "text": { "type": "string" },
-        "bundle_id": { "type": "string" },
-        "target": {
-          "type": "object",
-          "description": "For click events: semantic metadata about what was clicked, used by the synthesizer's destructive-keyword matcher and summary-text generator.",
-          "properties": {
-            "label": { "type": "string" },
-            "role": { "type": "string" },
-            "bundle_id": { "type": "string" }
-          }
+        "drag_to": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["x", "y"],
+              "properties": {
+                "x": { "type": "number" },
+                "y": { "type": "number" }
+              },
+              "additionalProperties": false
+            },
+            { "type": "null" }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "keypressPayload": {
+      "type": "object",
+      "required": ["keys"],
+      "properties": {
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" },
+          "description": "One or more keys that formed the chord. Modifier keys are represented by the modifier enum values ('cmd', 'ctrl', ...); printable keys use their character."
         },
-        "screenshot_ref": { "type": "string", "description": "Relative path under screenshots/, e.g. screenshots/0001.png" },
-        "note": { "type": "string" }
-      }
+        "modifiers": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/modifier" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "scrollPayload": {
+      "type": "object",
+      "required": ["direction", "delta"],
+      "properties": {
+        "direction": { "type": "string", "enum": ["up", "down", "left", "right"] },
+        "delta": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+    "appSwitchPayload": {
+      "type": "object",
+      "required": ["to_bundle_id"],
+      "properties": {
+        "from_bundle_id": { "type": ["string", "null"] },
+        "to_bundle_id": { "type": "string" },
+        "from_name": { "type": ["string", "null"] },
+        "to_name": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "windowFocusPayload": {
+      "type": "object",
+      "required": ["window_title"],
+      "properties": {
+        "window_title": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "textInputPayload": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string", "minLength": 1 },
+        "field_label": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "keyframePayload": {
+      "type": "object",
+      "required": ["reason"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": ["periodic", "app_switch", "pre_click", "post_click"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "tapReenabledPayload": {
+      "type": "object",
+      "properties": {
+        "cause": {
+          "type": "string",
+          "enum": ["timeout", "user_input", "unknown"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "allOf": [
+        { "$ref": "#/$defs/eventBase" },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "type": { "const": "click" },
+                "payload": { "$ref": "#/$defs/clickPayload" }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "keypress" },
+                "payload": { "$ref": "#/$defs/keypressPayload" }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "scroll" },
+                "payload": { "$ref": "#/$defs/scrollPayload" }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "app_switch" },
+                "payload": { "$ref": "#/$defs/appSwitchPayload" }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "window_focus" },
+                "payload": { "$ref": "#/$defs/windowFocusPayload" }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "text_input" },
+                "payload": { "$ref": "#/$defs/textInputPayload" }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "keyframe" },
+                "payload": { "$ref": "#/$defs/keyframePayload" }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "tap_reenabled" },
+                "payload": { "$ref": "#/$defs/tapReenabledPayload" }
+              }
+            }
+          ]
+        }
+      ]
     }
   }
 }

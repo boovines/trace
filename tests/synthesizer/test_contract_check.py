@@ -24,6 +24,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
 from synthesizer.check_contracts import (
     REPO_ROOT,
     check_contracts_are_valid_json_schema,

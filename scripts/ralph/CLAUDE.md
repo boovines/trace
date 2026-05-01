@@ -107,10 +107,39 @@ If no browser tools are available, note in your progress report that manual brow
 
 After completing a user story, check if ALL stories have `passes: true`.
 
-If ALL stories are complete and passing, reply with:
+If ALL stories are complete and passing, **run the pre-promise guards
+below**. If every guard passes, reply with:
 <promise>COMPLETE</promise>
 
 If there are still stories with `passes: false`, end your response normally (another iteration will pick up the next story).
+
+### Pre-promise guards
+
+These are per-branch gates that must pass BEFORE you may emit
+`<promise>COMPLETE</promise>`. They exist because some acceptance criteria
+require a real human on real hardware and cannot be satisfied by Ralph alone.
+
+**On `feat/recorder`: human smoke test sign-off.**
+
+Before emitting the completion promise, open `tests/recorder/smoke.md` and
+check the `## Sign-off` section at the bottom. A human tester must have
+replaced every `_____` placeholder with real content (at minimum: `Date`,
+`macOS version`, `Hardware`, and `Tester name / initials`).
+
+- If any `_____` placeholder in the Sign-off section is still present, do
+  NOT emit `<promise>COMPLETE</promise>`. Instead, end the response with the
+  plain-text line:
+
+      awaiting human smoke test
+
+  and stop. Do not mark anything else as `passes: false`, do not retry, and
+  do not re-run the story — the gate is simply waiting on a human.
+
+- If every placeholder has been filled in, proceed to emit the promise.
+
+This guard is intentionally a textual check against the `_____` literal
+written into `smoke.md` by story R-015. Do not "helpfully" fill the sign-off
+in yourself — that defeats the purpose of the gate.
 
 ## Important
 

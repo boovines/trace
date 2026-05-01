@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from synthesizer.draft import DraftGenerationError, DraftResult, Question
 from synthesizer.llm_client import LLMClient
 from synthesizer.session import (

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from synthesizer.destructive_matcher import (
     DESTRUCTIVE_KEYWORDS,
     apply_destructive_matcher,

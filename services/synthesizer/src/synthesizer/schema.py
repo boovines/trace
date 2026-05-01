@@ -21,7 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from jsonschema import (  # type: ignore[import-untyped]
+from jsonschema import (
     Draft202012Validator,
     FormatChecker,
     ValidationError,
@@ -156,7 +156,10 @@ def _raise_cross_check(message: str, path: str) -> None:
     either source.
     """
     err = ValidationError(message)
-    err.absolute_path.append(path)
+    # ``absolute_path`` is a ``deque[str | int]`` at runtime, but the
+    # ``types-jsonschema`` stubs widen it to ``Sequence[str | int]`` which
+    # doesn't expose ``.append``. Suppress the false positive.
+    err.absolute_path.append(path)  # type: ignore[attr-defined]
     raise err
 
 

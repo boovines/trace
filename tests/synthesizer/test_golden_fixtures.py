@@ -30,6 +30,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
 from synthesizer.check_fixtures import (
     FIXTURES_SKILLS_DIR,
     FIXTURES_TRAJECTORIES_DIR,

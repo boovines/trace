@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from jsonschema import ValidationError  # type: ignore[import-untyped]
+from jsonschema import ValidationError
 from pydantic import BaseModel, ConfigDict
 
 from synthesizer.destructive_matcher import (

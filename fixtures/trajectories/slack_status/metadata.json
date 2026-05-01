@@ -1,10 +1,25 @@
 {
-  "id": "b1a0f6f2-0004-4c00-8000-000000000004",
-  "started_at": "2026-04-22T17:00:00Z",
-  "stopped_at": "2026-04-22T17:00:25Z",
-  "label": "slack_status",
-  "display_info": { "width": 2560, "height": 1440, "scale": 2.0 },
+  "id": "44444444-4444-4444-8444-444444444444",
+  "label": "Set Slack status to heads down for 2 hours",
+  "started_at": "2026-04-01T13:00:00.000+00:00",
+  "stopped_at": "2026-04-01T13:01:40.000+00:00",
+  "display_info": {
+    "width": 1440,
+    "height": 900,
+    "scale_factor": 2.0
+  },
   "app_focus_history": [
-    { "at": "2026-04-22T17:00:00Z", "bundle_id": "com.tinyspeck.slackmacgap", "title": "Slack" }
+    {
+      "bundle_id": "com.google.Chrome",
+      "name": "Google Chrome",
+      "entered_at": "2026-04-01T13:00:00.000+00:00",
+      "exited_at": "2026-04-01T13:00:01.000+00:00"
+    },
+    {
+      "bundle_id": "com.tinyspeck.slackmacgap",
+      "name": "Slack",
+      "entered_at": "2026-04-01T13:00:01.000+00:00",
+      "exited_at": "2026-04-01T13:01:40.000+00:00"
+    }
   ]
 }

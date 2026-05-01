@@ -16,6 +16,7 @@ import anthropic
 import httpx
 import pytest
 import respx
+
 from synthesizer.llm_client import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,

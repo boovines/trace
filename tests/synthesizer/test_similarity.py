@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from synthesizer.llm_client import (
     DEFAULT_MAX_TOKENS,
     PRICING_USD_PER_MTOK,

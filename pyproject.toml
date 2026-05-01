@@ -11,36 +11,52 @@ dependencies = [
     "pydantic>=2.8",
     "anthropic>=0.40",
     "jsonschema>=4.23",
+    # Server-Sent Events transport for the synthesizer's question-and-answer
+    # endpoints — see services/synthesizer/src/synthesizer/api.py.
+    "sse-starlette>=2.1",
+    "trace-recorder",
+    "trace-synthesizer",
+    "trace-runner",
 ]
 
 [project.optional-dependencies]
-macos = [
-    "pyobjc-framework-Cocoa>=10.3",
-    "pyobjc-framework-Quartz>=10.3",
-    "pyobjc-framework-ApplicationServices>=10.3",
-]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
     "mypy>=1.11",
     "ruff>=0.6",
+    "types-jsonschema>=4.23",
+    # respx mocks httpx clients (used to stub the Anthropic SDK in synth tests).
+    "respx>=0.21",
+    # pillow round-trips preview PNGs in synth's golden-fixture tests.
+    "pillow>=10",
 ]
 
 [tool.uv.workspace]
 members = ["services/recorder", "services/synthesizer", "services/runner"]
 
+[tool.uv.sources]
+trace-recorder = { workspace = true }
+trace-synthesizer = { workspace = true }
+trace-runner = { workspace = true }
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = [".venv", "build", "dist"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["recorder", "synthesizer", "runner", "gateway"]
+
 [tool.ruff.lint.per-file-ignores]
-# draft_prompt.py embeds the full LLM system prompt as a multi-line string;
-# prose paragraphs regularly exceed 100 chars and hard-wrapping them would
-# only obscure the content the model actually sees.
+# draft_prompt.py / revise_prompt.py embed the full LLM system prompts as
+# multi-line strings; prose paragraphs regularly exceed 100 chars and
+# hard-wrapping them would only obscure what the model actually sees.
+# similarity.py contains long descriptive failure messages for snapshot diffs.
 "services/synthesizer/src/synthesizer/draft_prompt.py" = ["E501"]
 "services/synthesizer/src/synthesizer/revise_prompt.py" = ["E501"]
 "services/synthesizer/src/synthesizer/similarity.py" = ["E501"]
@@ -49,11 +65,27 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["services", "gateway"]
+# Recorder + synthesizer both use a src/ layout; runner has a flat layout
+# that mypy finds via the package install. mypy_path lets the type checker
+# resolve the src-layout packages.
+mypy_path = "services/recorder/src:services/synthesizer/src"
 
 [[tool.mypy.overrides]]
-module = ["Cocoa.*", "Quartz.*", "ApplicationServices.*", "AppKit.*"]
+module = [
+    "Cocoa.*",
+    "Quartz.*",
+    "ApplicationServices.*",
+    "AppKit.*",
+    "Foundation.*",
+    "objc.*",
+    "respx.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "macos: integration tests that require a real macOS host with Accessibility/Input Monitoring permissions granted; skipped by default off-darwin or without permissions.",
+    "uses_lsappinfo: tests that exercise the ``lsappinfo`` frontmost-app helper directly and opt out of the module-level stub that otherwise forces it to return None.",
+]

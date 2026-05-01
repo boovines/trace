@@ -34,7 +34,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from jsonschema import (  # type: ignore[import-untyped]
+from jsonschema import (
     Draft202012Validator,
     SchemaError,
 )

@@ -23,6 +23,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from httpx import ASGITransport
+
 from synthesizer import api as api_module
 from synthesizer.draft import DraftResult, Question
 from synthesizer.preprocess import PreprocessedTrajectory
@@ -280,7 +281,11 @@ async def test_happy_path_full_synthesis(client: httpx.AsyncClient) -> None:
     body = r.json()
     assert "## Steps" in body["markdown"]
     assert body["meta"]["slug"] == "gmail_reply_api_test"
-    assert len(body["preview_urls"]) == 1
+    # Preview count depends on how many keyframes the canonical R-013
+    # fixture emits (multiple per workflow, vs. the single placeholder synth
+    # originally used). Just assert at least one preview and that it
+    # points at the slug-scoped preview route.
+    assert len(body["preview_urls"]) >= 1
     assert body["preview_urls"][0].startswith(
         "/skills/gmail_reply_api_test/preview/"
     )

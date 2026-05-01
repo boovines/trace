@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 import respx
 from PIL import Image
+
 from synthesizer.destructive_matcher import apply_destructive_matcher
 from synthesizer.draft import (
     MAX_LLM_CALLS,

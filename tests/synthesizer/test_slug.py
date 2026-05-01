@@ -16,6 +16,7 @@ import re
 from pathlib import Path
 
 import pytest
+
 from synthesizer.slug import (
     SLUG_MAX_LEN,
     SLUG_MIN_LEN,

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from synthesizer.draft import (
     DraftGenerationError,
     DraftResult,

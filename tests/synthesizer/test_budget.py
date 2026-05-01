@@ -20,6 +20,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport
+
 from synthesizer import api as api_module
 from synthesizer.budget import (
     DEFAULT_DAILY_CAP_USD,

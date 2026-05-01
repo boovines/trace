@@ -1,4 +1,10 @@
-{"seq":1,"t":"2026-04-22T18:00:00Z","kind":"app_switch","bundle_id":"com.apple.Notes","screenshot_ref":"screenshots/0001.png"}
-{"seq":2,"t":"2026-04-22T18:00:06Z","kind":"click","x":120,"y":120,"button":"left","bundle_id":"com.apple.Notes","target":{"label":"New Note","role":"button","bundle_id":"com.apple.Notes"}}
-{"seq":3,"t":"2026-04-22T18:00:15Z","kind":"text_input","text":"2026-04-22","bundle_id":"com.apple.Notes"}
-{"seq":4,"t":"2026-04-22T18:00:30Z","kind":"text_input","text":"- AM: inbox\n- PM: focus\n- EOD: shutdown ritual","bundle_id":"com.apple.Notes"}
+{"type": "app_switch", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "payload": {"from_bundle_id": "com.apple.Safari", "from_name": "Safari", "to_bundle_id": "com.apple.Notes", "to_name": "Notes"}, "screenshot_ref": "screenshots/0001.png", "seq": 1, "timestamp_ms": 1774000001500}
+{"type": "window_focus", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "payload": {"window_title": "All iCloud"}, "seq": 2, "timestamp_ms": 1774000003000}
+{"type": "keypress", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "payload": {"keys": ["n"], "modifiers": ["cmd"]}, "seq": 3, "timestamp_ms": 1774000004500}
+{"type": "keyframe", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "screenshot_ref": "screenshots/0004.png", "payload": {"reason": "post_click"}, "seq": 4, "timestamp_ms": 1774000006000}
+{"type": "click", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "target": {"role": "AXTextField", "label": "Title", "description": null, "frame": {"x": 500.0, "y": 170.0, "w": 400.0, "h": 28.0}, "ax_identifier": "notes-title"}, "payload": {"button": "left"}, "seq": 5, "timestamp_ms": 1774000007500}
+{"type": "text_input", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "payload": {"text": "2026-04-23 Daily", "field_label": "Title"}, "seq": 6, "timestamp_ms": 1774000009000}
+{"type": "click", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "target": {"role": "AXTextArea", "label": "Body", "description": null, "frame": {"x": 500.0, "y": 240.0, "w": 600.0, "h": 400.0}, "ax_identifier": "notes-body"}, "payload": {"button": "left"}, "screenshot_ref": "screenshots/0007.png", "seq": 7, "timestamp_ms": 1774000010500}
+{"type": "text_input", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "payload": {"text": "## Plan\n- [ ] focus block 2pm\n## Wins\n- \n## Notes\n- ", "field_label": "Body"}, "seq": 8, "timestamp_ms": 1774000012000}
+{"type": "keypress", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "payload": {"keys": ["s"], "modifiers": ["cmd"]}, "seq": 9, "timestamp_ms": 1774000013500}
+{"type": "keyframe", "app": {"bundle_id": "com.apple.Notes", "name": "Notes", "pid": 504}, "screenshot_ref": "screenshots/0010.png", "payload": {"reason": "periodic"}, "seq": 10, "timestamp_ms": 1774000015000}

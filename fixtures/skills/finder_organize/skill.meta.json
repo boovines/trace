@@ -1,7 +1,7 @@
 {
   "slug": "finder_organize",
   "name": "Archive old PDFs from Downloads in Finder",
-  "trajectory_id": "b1a0f6f2-0003-4c00-8000-000000000003",
+  "trajectory_id": "33333333-3333-4333-8333-333333333333",
   "created_at": "2026-04-22T16:05:00+00:00",
   "parameters": [
     {
@@ -23,7 +23,9 @@
       "default": "~/Documents/Archive"
     }
   ],
-  "destructive_steps": [5],
+  "destructive_steps": [
+    5
+  ],
   "preconditions": [
     "Finder has read and write access to both {source_folder} and {target_folder}.",
     "The {target_folder} directory already exists (this workflow does not create it)."

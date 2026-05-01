@@ -11,6 +11,7 @@ If that ever fails, the Runner will start reporting mystery bugs days later.
 from __future__ import annotations
 
 import pytest
+
 from synthesizer.skill_doc import (
     DESTRUCTIVE_MARKER,
     Parameter,

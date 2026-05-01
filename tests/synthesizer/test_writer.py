@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 from jsonschema import ValidationError  # type: ignore[import-untyped]
+
 from synthesizer.schema import validate_meta, validate_meta_against_markdown
 from synthesizer.skill_doc import Parameter, ParsedSkill, Step, parse_skill_md
 from synthesizer.trajectory_reader import TrajectoryReader

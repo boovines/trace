@@ -421,7 +421,14 @@ def preprocess_trajectory(reader: TrajectoryReader) -> PreprocessedTrajectory:
             estimated_input_tokens=0,
         )
 
-    t0_ms = _parse_iso_ms(reader.metadata["started_at"])
+    # Anchor relative timestamps at ``min(metadata.started_at, first_event.t)``
+    # so synthetic / regenerated fixtures whose metadata clock disagrees with
+    # the events' clock still produce non-negative deltas. Real recordings
+    # always satisfy ``started_at <= first_event.t`` and this is a no-op for
+    # them.
+    metadata_t0_ms = _parse_iso_ms(reader.metadata["started_at"])
+    first_event_t0_ms = _parse_iso_ms(events[0].t) if events else metadata_t0_ms
+    t0_ms = min(metadata_t0_ms, first_event_t0_ms)
     collapsed = _collapse_stream(events, t0_ms)
     selected = _select_keyframes(collapsed)
     digest = _apply_keyframe_selection(collapsed, selected)

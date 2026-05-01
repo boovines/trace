@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
 from synthesizer.draft import DraftResult, generate_draft
 from synthesizer.llm_client import LLMClient
 from synthesizer.preprocess import preprocess_trajectory

@@ -1,10 +1,25 @@
 {
-  "id": "b1a0f6f2-0003-4c00-8000-000000000003",
-  "started_at": "2026-04-22T16:00:00Z",
-  "stopped_at": "2026-04-22T16:01:00Z",
-  "label": "finder_organize",
-  "display_info": { "width": 2560, "height": 1440, "scale": 2.0 },
+  "id": "33333333-3333-4333-8333-333333333333",
+  "label": "Move old PDFs from Downloads to Archive",
+  "started_at": "2026-04-01T12:00:00.000+00:00",
+  "stopped_at": "2026-04-01T12:03:00.000+00:00",
+  "display_info": {
+    "width": 1440,
+    "height": 900,
+    "scale_factor": 2.0
+  },
   "app_focus_history": [
-    { "at": "2026-04-22T16:00:00Z", "bundle_id": "com.apple.finder", "title": "Downloads" }
+    {
+      "bundle_id": "com.google.Chrome",
+      "name": "Google Chrome",
+      "entered_at": "2026-04-01T12:00:00.000+00:00",
+      "exited_at": "2026-04-01T12:00:01.000+00:00"
+    },
+    {
+      "bundle_id": "com.apple.finder",
+      "name": "Finder",
+      "entered_at": "2026-04-01T12:00:01.000+00:00",
+      "exited_at": "2026-04-01T12:03:00.000+00:00"
+    }
   ]
 }

@@ -11,6 +11,7 @@ import httpx
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
 from synthesizer import __version__
 from synthesizer.api import router
 

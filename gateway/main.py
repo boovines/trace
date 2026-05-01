@@ -8,13 +8,15 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from services.recorder.recorder.api import router as recorder_router
+from recorder.api import router as recorder_router
+from recorder.api import trajectories_router
 from services.runner.runner.api import router as runner_router
 from services.synthesizer.synthesizer.api import router as synthesizer_router
 
 app = FastAPI(title="Trace gateway", version="0.1.0")
 
 app.include_router(recorder_router, prefix="/recorder", tags=["recorder"])
+app.include_router(trajectories_router, tags=["recorder"])
 app.include_router(synthesizer_router, tags=["synthesizer"])
 app.include_router(runner_router, tags=["runner"])
 
