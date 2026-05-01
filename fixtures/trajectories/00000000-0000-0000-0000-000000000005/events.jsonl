@@ -1,0 +1,5 @@
+{"t": "2026-04-20T18:00:03Z", "kind": "screenshot", "screenshot_ref": "screenshots/0001.png"}
+{"t": "2026-04-20T18:00:05Z", "kind": "mouse_down", "button": "left", "x": 48, "y": 28, "note": "step=2;target=New Note button"}
+{"t": "2026-04-20T18:00:05.020Z", "kind": "mouse_up", "button": "left", "x": 48, "y": 28}
+{"t": "2026-04-20T18:00:07Z", "kind": "screenshot", "screenshot_ref": "screenshots/0002.png"}
+{"t": "2026-04-20T18:00:10Z", "kind": "text_input", "text": "2026-04-22", "note": "step=3;target=Note title"}

@@ -1,0 +1,6 @@
+{"t": "2026-04-20T14:00:03Z", "kind": "screenshot", "screenshot_ref": "screenshots/0001.png"}
+{"t": "2026-04-20T14:00:05Z", "kind": "mouse_down", "button": "left", "x": 256, "y": 48, "note": "step=2;target=Gmail search bar"}
+{"t": "2026-04-20T14:00:05.020Z", "kind": "mouse_up", "button": "left", "x": 256, "y": 48}
+{"t": "2026-04-20T14:00:07Z", "kind": "screenshot", "screenshot_ref": "screenshots/0002.png"}
+{"t": "2026-04-20T14:01:20Z", "kind": "mouse_down", "button": "left", "x": 300, "y": 720, "note": "step=7;target=Send button;destructive=true"}
+{"t": "2026-04-20T14:01:20.020Z", "kind": "mouse_up", "button": "left", "x": 300, "y": 720}

@@ -27,10 +27,10 @@ dev = [
     "mypy>=1.11",
     "ruff>=0.6",
     "types-jsonschema>=4.23",
-    # respx mocks httpx clients (used to stub the Anthropic SDK in synth tests).
+    # respx mocks httpx clients (used to stub the Anthropic SDK in runner & synth tests).
     "respx>=0.21",
-    # pillow round-trips preview PNGs in synth's golden-fixture tests.
-    "pillow>=10",
+    # pillow round-trips preview PNGs in snapshot/golden-fixture tests.
+    "pillow>=10.4",
 ]
 
 [tool.uv.workspace]
@@ -60,15 +60,23 @@ known-first-party = ["recorder", "synthesizer", "runner", "gateway"]
 "services/synthesizer/src/synthesizer/draft_prompt.py" = ["E501"]
 "services/synthesizer/src/synthesizer/revise_prompt.py" = ["E501"]
 "services/synthesizer/src/synthesizer/similarity.py" = ["E501"]
+# Stage-1 merge: a number of runner test files now embed canonical
+# notes_daily params (`{"note_template": "- [ ] focus block\n"}`) inline
+# inside JSON request bodies that already had ``"skill_slug": "notes_daily"``.
+# Wrapping each call site would obscure the test intent; allow long lines
+# in the test layer.
+"tests/runner/test_api.py" = ["E501"]
+"tests/runner/test_e2e_fake.py" = ["E501"]
+"tests/runner/test_budget_config.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = true
 files = ["services", "gateway"]
-# Recorder + synthesizer both use a src/ layout; runner has a flat layout
-# that mypy finds via the package install. mypy_path lets the type checker
-# resolve the src-layout packages.
-mypy_path = "services/recorder/src:services/synthesizer/src"
+# All three modules now use a src/ layout for their packages.
+# mypy_path lets the type checker resolve the in-tree packages.
+mypy_path = "services/recorder/src:services/synthesizer/src:services/runner/src"
+explicit_package_bases = true
 
 [[tool.mypy.overrides]]
 module = [
@@ -85,7 +93,9 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["services/recorder/src", "services/synthesizer/src", "services/runner/src"]
 markers = [
     "macos: integration tests that require a real macOS host with Accessibility/Input Monitoring permissions granted; skipped by default off-darwin or without permissions.",
     "uses_lsappinfo: tests that exercise the ``lsappinfo`` frontmost-app helper directly and opt out of the module-level stub that otherwise forces it to return None.",
+    "live_input: test posts real events via CGEventPost; skipped unless --run-live-input is passed.",
 ]

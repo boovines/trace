@@ -1,0 +1,57 @@
+{
+  "slug": "notes_daily",
+  "marker": "Notes Daily",
+  "description": "Canned multi-turn response for notes_daily. No destructive steps, so the script flows straight to <workflow_complete/>.",
+  "turns": [
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 800,
+      "output_tokens": 32,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_notes_1",
+          "name": "computer",
+          "input": {"action": "screenshot"}
+        }
+      ]
+    },
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 820,
+      "output_tokens": 30,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_notes_2",
+          "name": "computer",
+          "input": {"action": "left_click", "coordinate": [96, 56]}
+        }
+      ]
+    },
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 860,
+      "output_tokens": 40,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_notes_3",
+          "name": "computer",
+          "input": {"action": "type", "text": "2026-04-22"}
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 900,
+      "output_tokens": 14,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Note created and populated. <workflow_complete/>"
+        }
+      ]
+    }
+  ]
+}
