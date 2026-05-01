@@ -48,28 +48,47 @@ class CapabilityRegistry:
     """Snapshot of which execution tiers the host can currently use.
 
     The :attr:`mcp_servers` set names the MCP servers the runner has live
-    connections to; tier-mcp hints whose ``mcp_server`` is not in this set
-    are skipped. ``browser_dom`` and ``computer_use`` are simple booleans
-    today but kept as named flags so a later step can scope them per
-    target (e.g. browser_dom only when Chrome is the frontmost app).
+    connections to; tier-mcp hints whose ``mcp_server`` is not in this
+    set are skipped. The optional :attr:`mcp_functions` map narrows that
+    further: when populated, a tier-mcp hint is only supported if its
+    ``function`` name is also in ``mcp_functions[server]``. The probe
+    layer (:mod:`runner.mcp_client`) populates this map from the
+    server's actual ``tools/list`` response so the synthesizer can't
+    name a tool the live server doesn't actually expose.
+
+    ``browser_dom`` and ``computer_use`` are simple booleans today but
+    kept as named flags so a later step can scope them per target
+    (e.g. browser_dom only when Chrome is the frontmost app).
     """
 
     mcp_servers: frozenset[str] = field(default_factory=frozenset)
+    mcp_functions: Mapping[str, frozenset[str]] = field(default_factory=dict)
     browser_dom: bool = False
     computer_use: bool = True
 
     def supports(self, hint: Mapping[str, Any]) -> bool:
         """Return True when ``hint`` is dispatchable under this registry.
 
-        Only checks the tier-level capability and (for MCP) the named
-        server. Argument validity is the catalog's job at synth time and
-        the dispatcher's job at run time — this is the cheap pre-check
-        the resolver uses to walk the candidate list.
+        Checks the tier-level capability, the named server (for MCP),
+        and (when populated) the function name against
+        ``mcp_functions[server]``. Argument validity is the catalog's
+        job at synth time and the dispatcher's job at run time — this
+        is the cheap pre-check the resolver uses to walk the candidate
+        list.
         """
         tier = hint.get("tier")
         if tier == Tier.MCP.value:
             server = hint.get("mcp_server")
-            return isinstance(server, str) and server in self.mcp_servers
+            if not isinstance(server, str) or server not in self.mcp_servers:
+                return False
+            # When the registry didn't probe function names (legacy /
+            # default), accept any function on the server. When it did,
+            # the function must be present.
+            fn_set = self.mcp_functions.get(server)
+            if fn_set is None or not fn_set:
+                return True
+            function = hint.get("function")
+            return isinstance(function, str) and function in fn_set
         if tier == Tier.BROWSER_DOM.value:
             return self.browser_dom
         if tier == Tier.COMPUTER_USE.value:
@@ -129,13 +148,22 @@ def _reason_unsupported(hint: Mapping[str, Any], registry: CapabilityRegistry) -
     tier = hint.get("tier")
     if tier == Tier.MCP.value:
         server = hint.get("mcp_server", "<missing>")
-        if server in registry.mcp_servers:
-            # Defensive: shouldn't happen if supports() returned False.
-            return f"mcp server {server!r} flagged unsupported"
-        connected = ", ".join(sorted(registry.mcp_servers)) or "(none)"
-        return (
-            f"mcp server {server!r} not connected; live servers: {connected}"
-        )
+        if server not in registry.mcp_servers:
+            connected = ", ".join(sorted(registry.mcp_servers)) or "(none)"
+            return (
+                f"mcp server {server!r} not connected; live servers: {connected}"
+            )
+        # Server is healthy but the function isn't in the live tool list.
+        function = hint.get("function", "<missing>")
+        fn_set = registry.mcp_functions.get(server)
+        if fn_set is not None and fn_set:
+            available = ", ".join(sorted(fn_set)[:6])
+            tail = "" if len(fn_set) <= 6 else f" (+{len(fn_set) - 6} more)"
+            return (
+                f"mcp {server}.{function} not in live tool list; "
+                f"available: {available}{tail}"
+            )
+        return f"mcp {server}.{function} unsupported (no probe data)"
     if tier == Tier.BROWSER_DOM.value:
         return (
             "browser_dom tier disabled; enable with a Playwright capability "
