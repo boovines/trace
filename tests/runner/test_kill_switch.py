@@ -256,7 +256,7 @@ def _build(
     tracker = BudgetTracker(budget=RunBudget(), time_source=lambda: 0.0)
     executor = Executor(
         loaded_skill=loaded,
-        parameters={},
+        parameters={"note_template": "- [ ] focus block\n"},
         mode=mode,
         agent_runtime=runtime,
         input_adapter=adapter,
@@ -531,7 +531,7 @@ async def test_executor_without_kill_switch_still_works(
     tracker = BudgetTracker(budget=RunBudget(), time_source=lambda: 0.0)
     executor = Executor(
         loaded_skill=loaded,
-        parameters={},
+        parameters={"note_template": "- [ ] focus block\n"},
         mode="dry_run",
         agent_runtime=FakeAgentRuntime(responses),
         input_adapter=DryRunInputAdapter(),
@@ -596,7 +596,7 @@ async def test_kill_cancels_inflight_httpx_request(
 
     executor = Executor(
         loaded_skill=loaded,
-        parameters={},
+        parameters={"note_template": "- [ ] focus block\n"},
         mode="dry_run",
         agent_runtime=runtime,
         input_adapter=DryRunInputAdapter(),

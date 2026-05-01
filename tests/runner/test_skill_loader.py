@@ -79,13 +79,19 @@ _VALID_MD = (
 
 
 def _valid_meta(slug: str = "test_skill") -> dict[str, Any]:
+    # Canonical skill-meta.schema.json (post-merge) requires:
+    #   slug, name, trajectory_id, created_at, parameters, destructive_steps,
+    #   preconditions, step_count.
+    # ``version`` was dropped; ``trajectory_ref`` was renamed to ``trajectory_id``.
     return {
         "slug": slug,
-        "version": "0.1.0",
-        "trajectory_ref": "00000000-0000-0000-0000-000000000000",
+        "name": "Test Skill",
+        "trajectory_id": "00000000-0000-0000-0000-000000000000",
         "created_at": "2026-04-22T00:00:00Z",
         "parameters": [],
         "destructive_steps": [2],
+        "preconditions": [],
+        "step_count": 2,
     }
 
 
@@ -116,7 +122,10 @@ def test_load_skill_malformed_meta_json(tmp_path: Path) -> None:
 
 def test_load_skill_meta_missing_required_field(tmp_path: Path) -> None:
     meta = _valid_meta()
-    del meta["trajectory_ref"]
+    # Was ``trajectory_ref`` pre-merge; canonical schema renames it to
+    # ``trajectory_id``. Either deletion still proves the schema validator
+    # fires when a required key is missing.
+    del meta["trajectory_id"]
     _write_skill(tmp_path, "test_skill", md=_VALID_MD, meta=meta)
     with pytest.raises(SkillIntegrityError):
         load_skill("test_skill", tmp_path)
@@ -139,18 +148,31 @@ def test_load_skill_rejects_meta_that_is_array(tmp_path: Path) -> None:
 
 
 def test_load_skill_destructive_marker_in_md_but_not_meta(tmp_path: Path) -> None:
+    # Canonical synth requires the full 4-section SKILL.md plus a description.
+    # Use a fully-shaped doc so the parser succeeds; the test is about
+    # catching drift between the meta's ``destructive_steps`` and the
+    # ``⚠️ [DESTRUCTIVE]`` markers in the markdown — that mismatch should
+    # still bubble up as a SkillIntegrityError (now via the canonical
+    # parser's drift check rather than runner's old hand-rolled one).
     md = (
         "# Test Skill\n\n"
+        "A test skill used by runner unit tests.\n\n"
+        "## Parameters\n\n_None._\n\n"
+        "## Preconditions\n\n_None._\n\n"
         "## Steps\n\n"
         "1. First step.\n"
-        "2. ⚠️ Second step (marked in md only).\n"
+        "2. ⚠️ [DESTRUCTIVE] Second step (marked in md only).\n\n"
+        "## Expected outcome\n\nDone.\n"
     )
     meta = _valid_meta()
     meta["destructive_steps"] = []  # drift: md says 2 is destructive, meta says none
     _write_skill(tmp_path, "test_skill", md=md, meta=meta)
     with pytest.raises(SkillIntegrityError) as exc_info:
         load_skill("test_skill", tmp_path)
-    assert "disagree" in str(exc_info.value).lower() or "⚠" in str(exc_info.value)
+    msg = str(exc_info.value).lower()
+    # Either the historical "disagree" wording or any reference to
+    # destructive-step drift / the marker character is acceptable.
+    assert "disagree" in msg or "destructive" in msg or "⚠" in str(exc_info.value)
 
 
 def test_load_skill_destructive_in_meta_but_not_md(tmp_path: Path) -> None:
@@ -200,18 +222,123 @@ def test_load_skill_markdown_non_contiguous_numbering(tmp_path: Path) -> None:
 # ---------- substitute_parameters ----------
 
 
+def _render_param_bullet(p: dict[str, Any]) -> str:
+    """Format one parameter as canonical synth's `## Parameters` bullet.
+
+    Bullet format (from synth.skill_doc._PARAM_LINE_RE):
+        - `name` (type, required|optional[, default: ...]) [— description]
+
+    Synth's default-parser is strict: string defaults must be double-quoted,
+    integer/boolean defaults are bare. JSON-encode by type so both shapes
+    round-trip cleanly.
+    """
+    name = p["name"]
+    type_ = p.get("type", "string")
+    # Canonical synth's parameter type enum is {string, integer, boolean};
+    # the pre-merge schema accepted ``number``. Map it to the canonical type
+    # for parser compatibility.
+    if type_ == "number":
+        type_ = "integer"
+    required = "required"
+    default_clause = ""
+    if "default" in p and p["default"] is not None:
+        required = "optional"
+        raw_default = p["default"]
+        if type_ == "string":
+            default_str = f'"{raw_default}"'
+        elif type_ == "boolean":
+            default_str = "true" if raw_default else "false"
+        else:
+            default_str = str(raw_default)
+        default_clause = f", default: {default_str}"
+    elif p.get("required") is False:
+        required = "optional"
+    return f"- `{name}` ({type_}, {required}{default_clause})"
+
+
+def _extract_title_and_steps_block(md: str) -> tuple[str, str]:
+    """Return ``(title_line, steps_body)`` extracted from a pre-merge
+    minimal SKILL.md.
+
+    The legacy fixtures look like::
+
+        # Title
+
+        ## Steps
+
+        1. step one
+        2. step two
+
+    Anything outside the title and the Steps body is discarded. Bare
+    ``⚠️`` markers are normalised to canonical ``⚠️ [DESTRUCTIVE]`` so
+    the strict parser accepts them.
+    """
+    import re
+
+    title = "# Inline Test Skill"
+    steps_body = ""
+    if md.startswith("# "):
+        first_newline = md.find("\n")
+        if first_newline != -1:
+            title = md[:first_newline].strip()
+    if "## Steps" in md:
+        _, _, after = md.partition("## Steps")
+        # Trim until the next H2 or EOF.
+        next_h2 = after.find("\n## ")
+        steps_body = after[:next_h2].strip() if next_h2 != -1 else after.strip()
+    # Normalise the legacy bare-marker form. Match ``\d+. ⚠️ `` not already
+    # followed by ``[DESTRUCTIVE]``.
+    steps_body = re.sub(
+        r"(\d+\. )⚠️ (?!\[DESTRUCTIVE\])",
+        r"\1⚠️ [DESTRUCTIVE] ",
+        steps_body,
+    )
+    return title, steps_body
+
+
+def _inflate_to_canonical_md(md: str, parameters: list[dict[str, Any]]) -> str:
+    """Build a fully-compliant SKILL.md around the test's steps body."""
+    title, steps_body = _extract_title_and_steps_block(md)
+    if parameters:
+        params_section = "\n".join(_render_param_bullet(p) for p in parameters)
+    else:
+        params_section = "_None._"
+    return (
+        f"{title}\n\n"
+        "A test skill used by runner unit tests.\n\n"
+        "## Parameters\n\n"
+        f"{params_section}\n\n"
+        "## Preconditions\n\n"
+        "_None._\n\n"
+        "## Steps\n\n"
+        f"{steps_body}\n\n"
+        "## Expected outcome\n\n"
+        "Test passes.\n"
+    )
+
+
 def _skill_with_params(parameters: list[dict[str, Any]], md: str) -> LoadedSkill:
     # Build a LoadedSkill in-memory without touching disk.
     from synthesizer.skill_doc import parse_skill_md
 
+    # Canonical synth's SKILL.md parser is strict: it requires a description
+    # paragraph and four named sections (Parameters, Preconditions, Steps,
+    # Expected outcome). Runner's tests only care about the Steps body; they
+    # used to pass minimalist markdown that the pre-merge synth accepted.
+    # Synthesize a fully-compliant document by extracting the title + steps
+    # from the supplied ``md`` and rendering the surrounding sections from
+    # the parameters list.
+    md = _inflate_to_canonical_md(md, parameters)
     parsed = parse_skill_md(md)
     meta: dict[str, Any] = {
         "slug": "inline_test",
-        "version": "0.1.0",
-        "trajectory_ref": "00000000-0000-0000-0000-000000000000",
+        "name": "Inline Test Skill",
+        "trajectory_id": "00000000-0000-0000-0000-000000000000",
         "created_at": "2026-04-22T00:00:00Z",
         "parameters": parameters,
         "destructive_steps": [s.number for s in parsed.steps if s.destructive],
+        "preconditions": [],
+        "step_count": len(parsed.steps),
     }
     return LoadedSkill(parsed_skill=parsed, meta=meta, skill_path=Path("/tmp/inline"))
 
@@ -345,10 +472,14 @@ def test_substitute_on_golden_fixture_with_defaults() -> None:
 
 
 def test_substitute_golden_fixture_all_params_supplied() -> None:
+    # Canonical gmail_reply fixture declares ``recipient_name`` and
+    # ``reply_body`` (required) plus ``reply_subject_prefix`` (optional, default
+    # ``"Re:"``). Pre-merge it had ``sender``/``template``.
     loaded = load_skill("gmail_reply", _FIXTURES_ROOT)
     out = substitute_parameters(
-        loaded, {"sender": "alice@example.com", "template": "Thanks!"}
+        loaded,
+        {"recipient_name": "Alice", "reply_body": "Thanks!"},
     )
     for step in out.parsed_skill.steps:
-        assert "{sender}" not in step.text
-        assert "{template}" not in step.text
+        assert "{recipient_name}" not in step.text
+        assert "{reply_body}" not in step.text

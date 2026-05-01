@@ -1,16 +1,30 @@
-# Finder Organize
+# Archive old PDFs from Downloads in Finder
 
-Move every PDF in ~/Downloads older than N days into ~/Documents/Archive.
+In macOS Finder, cut every PDF in the Downloads folder that is older than a configured age and paste the files into the Documents Archive folder.
 
 ## Parameters
 
-- `age_days` (number) — Minimum age of files to move, in days.
-- `archive_name` (string) — Destination folder name under ~/Documents.
+- `file_age_days` (integer, optional, default: 7) — age threshold in days; files older than this are moved.
+- `source_folder` (string, required, default: "~/Downloads") — folder scanned for PDFs to archive.
+- `target_folder` (string, required, default: "~/Documents/Archive") — destination folder that receives the archived PDFs.
+
+## Preconditions
+
+- Finder has read and write access to both {source_folder} and {target_folder}.
+- The {target_folder} directory already exists (this workflow does not create it).
 
 ## Steps
 
-1. Open Finder and navigate to the Downloads folder.
-2. Switch the view to List view.
-3. Click the Kind column header to sort by file type.
-4. Select every PDF older than {age_days} days.
-5. ⚠️ Drag the selection into the ~/Documents/{archive_name} folder.
+1. Switch focus to Finder and open the {source_folder} window.
+2. Sort the file list by Date Modified (descending) and select every PDF older than {file_age_days} days.
+3. Press Command+X to cut the selected PDFs.
+4. Navigate Finder to the {target_folder} window.
+5. ⚠️ [DESTRUCTIVE] Press Command+V to transfer the cut PDFs from {source_folder} into {target_folder}.
+
+## Expected outcome
+
+Every PDF in {source_folder} older than {file_age_days} days is now located in {target_folder}, and the originals are no longer present in {source_folder}.
+
+## Notes
+
+The paste step is flagged destructive because moving files between Finder folders cannot be reverted with Command+Z once Finder has committed the operation. The Runner should confirm the selection count before step 5.

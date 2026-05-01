@@ -20,7 +20,11 @@ from __future__ import annotations
 from typing import Final, Literal
 
 from runner.skill_loader import LoadedSkill
-from synthesizer.skill_doc import ParsedSkill, SkillStep
+
+# See note in skill_loader.py — canonical synth renamed ``SkillStep`` to
+# ``Step``. Alias on import so the rest of this module keeps reading naturally.
+from synthesizer.skill_doc import ParsedSkill
+from synthesizer.skill_doc import Step as SkillStep
 
 Mode = Literal["dry_run", "live"]
 

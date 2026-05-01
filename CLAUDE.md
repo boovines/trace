@@ -182,13 +182,25 @@ Any Ralph iteration must run and pass these before setting `passes: true` on any
 uv run ruff check services/                   # lint
 uv run mypy --strict services/                # type check
 uv run pytest tests/<current-module>/         # module-specific tests
+./scripts/check_fixtures.sh                   # golden SKILL fixtures (< 5 s)
+./scripts/check_contracts.sh                  # cross-module schemas + fixtures (< 10 s)
 
 # Frontend (only on feat/integration branch)
 pnpm --filter app typecheck
 pnpm --filter app test
 ```
 
+The golden skill fixtures under `fixtures/skills/` are **hand-crafted ground truth** for the synthesizer's similarity tests (S-014, S-017). Ralph iterations must NOT regenerate them from a synthesized draft — see `fixtures/skills/README.md`.
+
 If the current branch is `feat/integration`, also run browser verification via the dev-browser skill for any UI story.
+
+---
+
+## Synthesizer module (Module 2)
+
+The synthesizer's pre-merge gate is the real-API smoke test at `tests/synthesizer/test_real_smoke.py`. It runs `generate_draft` against real Claude Sonnet 4.5 for each of the five reference workflows, scores each result against the hand-crafted golden via Claude Haiku 4.5, and asserts `destructive_match == 1.0` on all five and `overall >= 0.80` on at least four. Total spend is capped at $2 per run (PRD `apiCostBudgetForSmoke`).
+
+The smoke test is gated behind `TRACE_REAL_API_TESTS=1` and is **not** part of the Ralph loop — Ralph emits `SYNTHESIZER_DONE` based on fake-mode tests only. A human runs it before merging `feat/synthesizer` to `main` and attaches `tests/synthesizer/smoke_report.json` to the PR description. See `tests/synthesizer/README.md` for the run command and expected costs.
 
 ---
 

@@ -26,16 +26,27 @@ ALL_SLUGS = (
     "notes_daily",
 )
 
+# Canonical gmail_reply fixture (post-merge) declares ``recipient_name`` /
+# ``reply_body`` / ``reply_subject_prefix``. Pre-merge it had
+# ``sender``/``template``.
 GMAIL_PARAMS: dict[str, str] = {
-    "sender": "alice@example.com",
-    "template": "Got it — will reply by EOD.",
+    "recipient_name": "Alice",
+    "reply_body": "Got it — will reply by EOD.",
+}
+
+# notes_daily now declares ``note_template`` as a required (no-default) param.
+# Other notes_daily params have defaults so we don't need to supply them.
+NOTES_PARAMS: dict[str, str] = {"note_template": "- [ ] focus block\n"}
+
+_PER_SLUG_PARAMS: dict[str, dict[str, str]] = {
+    "gmail_reply": GMAIL_PARAMS,
+    "notes_daily": NOTES_PARAMS,
 }
 
 
 def _resolved(slug: str) -> LoadedSkill:
     skill = load_skill(slug, FIXTURES_ROOT)
-    params: dict[str, str] = GMAIL_PARAMS if slug == "gmail_reply" else {}
-    return substitute_parameters(skill, params)
+    return substitute_parameters(skill, _PER_SLUG_PARAMS.get(slug, {}))
 
 
 @pytest.mark.parametrize("slug", ALL_SLUGS)
@@ -71,8 +82,9 @@ def test_prompt_includes_skill_title_and_steps(slug: str) -> None:
 
 def test_destructive_step_rendered_with_marker() -> None:
     prompt = build_execution_prompt(_resolved("gmail_reply"), "dry_run")
-    # gmail_reply marks step 7 as destructive.
-    assert "7. ⚠️ [DESTRUCTIVE] " in prompt
+    # Canonical gmail_reply marks step 5 (Send) as destructive; pre-merge
+    # fixture had a different step layout.
+    assert "5. ⚠️ [DESTRUCTIVE] " in prompt
 
 
 def test_non_destructive_skill_has_no_marker() -> None:
@@ -89,11 +101,11 @@ def test_non_destructive_skill_has_no_marker() -> None:
 
 def test_parameters_substituted_in_prompt() -> None:
     prompt = build_execution_prompt(_resolved("gmail_reply"), "dry_run")
-    assert "alice@example.com" in prompt
+    assert "Alice" in prompt
     assert "Got it — will reply by EOD." in prompt
     # Raw placeholders should no longer appear.
-    assert "{sender}" not in prompt
-    assert "{template}" not in prompt
+    assert "{recipient_name}" not in prompt
+    assert "{reply_body}" not in prompt
 
 
 @pytest.mark.parametrize("slug", ALL_SLUGS)
@@ -169,10 +181,10 @@ def test_substitute_then_build_uses_resolved_text() -> None:
     raw = load_skill("gmail_reply", FIXTURES_ROOT)
     # Without substitution the prompt still builds but contains placeholders.
     prompt_raw = build_execution_prompt(raw, "dry_run")
-    assert "{sender}" in prompt_raw
+    assert "{recipient_name}" in prompt_raw
     # After substitution they are gone.
     prompt_resolved = build_execution_prompt(
         substitute_parameters(raw, GMAIL_PARAMS), "dry_run"
     )
-    assert "{sender}" not in prompt_resolved
-    assert "alice@example.com" in prompt_resolved
+    assert "{recipient_name}" not in prompt_resolved
+    assert "Alice" in prompt_resolved

@@ -259,7 +259,7 @@ async def test_start_run_dry_run_returns_run_id(
 ) -> None:
     resp = await client.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -277,7 +277,7 @@ async def test_start_run_execute_without_trace_allow_live_returns_400(
 ) -> None:
     resp = await client.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "execute"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "execute"},
     )
     assert resp.status_code == 400
     assert "TRACE_ALLOW_LIVE" in resp.json()["detail"]
@@ -299,7 +299,7 @@ async def test_start_run_unknown_skill_returns_404(
 async def test_get_run_returns_metadata(client: AsyncClient) -> None:
     resp = await client.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     run_id = resp.json()["run_id"]
     manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
@@ -346,7 +346,7 @@ async def test_confirm_on_non_awaiting_run_returns_409(
             "/run/start",
             json={
                 "skill_slug": "notes_daily",
-                "parameters": {},
+                "parameters": {"note_template": "- [ ] focus block\n"},
                 "mode": "dry_run",
             },
         )
@@ -399,7 +399,7 @@ async def test_abort_active_run_transitions_to_aborted(
             "/run/start",
             json={
                 "skill_slug": "notes_daily",
-                "parameters": {},
+                "parameters": {"note_template": "- [ ] focus block\n"},
                 "mode": "dry_run",
             },
         )
@@ -424,7 +424,7 @@ async def test_abort_already_finished_run_is_idempotent(
 ) -> None:
     resp = await client.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     run_id = resp.json()["run_id"]
     manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
@@ -469,7 +469,9 @@ async def test_list_runs_newest_first_and_filter(
         run_ids = []
         for slug in ("notes_daily", "gmail_reply", "notes_daily"):
             params = (
-                {"sender": "a@b.co", "template": "hi"} if slug == "gmail_reply" else {}
+                {"recipient_name": "Alice", "reply_body": "hi"}
+                if slug == "gmail_reply"
+                else {"note_template": "- [ ] focus block\n"}
             )
             # gmail_reply has a destructive step, so we'd need to confirm — use
             # notes_daily primarily for the listing test but include one gmail_reply
@@ -523,7 +525,7 @@ async def test_list_runs_newest_first_and_filter(
 async def test_get_events_returns_array(client: AsyncClient) -> None:
     resp = await client.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     run_id = resp.json()["run_id"]
     manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
@@ -549,7 +551,7 @@ async def test_get_screenshot_serves_png(
 ) -> None:
     resp = await client.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     run_id = resp.json()["run_id"]
     manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
@@ -571,7 +573,7 @@ async def test_get_screenshot_missing_returns_404(
 ) -> None:
     resp = await client.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     run_id = resp.json()["run_id"]
     manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
@@ -611,7 +613,7 @@ def test_websocket_happy_path_start_stream_confirm_done(
         "/run/start",
         json={
             "skill_slug": "gmail_reply",
-            "parameters": {"sender": "a@b.co", "template": "hi"},
+            "parameters": {"recipient_name": "Alice", "reply_body": "hi"},
             "mode": "dry_run",
         },
     )

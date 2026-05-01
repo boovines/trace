@@ -1,48 +1,27 @@
 #!/usr/bin/env bash
-# Verify repo-level contracts that cannot be expressed inside the JSON Schemas
-# themselves. Run locally before changing anything in contracts/ and in CI.
+# End-to-end cross-module contract and fixture consistency check.
 #
-# Current checks:
-#   * contracts/destructive_keywords.json exists, is a JSON array, has exactly
-#     14 entries, and every entry is a lowercase non-empty string. The list is
-#     imported by both the runner (harness-layer gate) and the synthesizer
-#     (authoring-time ⚠️ flagger); expanding it without coordination is a bug.
+# Checks performed:
+#   1. Every *.schema.json under contracts/ is valid JSON Schema draft 2020-12.
+#   2. Every trajectory under fixtures/trajectories/<dir>/ passes the trajectory
+#      schema (metadata.json + every line of events.jsonl).
+#   3. Every golden skill under fixtures/skills/<dir>/ passes schema + round-trip
+#      + markdown/meta cross-check (same suite as scripts/check_fixtures.sh).
+#   4. Every golden skill's meta.trajectory_id resolves to a real trajectory
+#      fixture whose metadata.json.id matches.
+#
+# Exits non-zero (and prints the specific offending file + reason) on any
+# failure. Finishes in well under ten seconds on the full fixture set.
+#
+# Works from the repo root regardless of which branch is checked out — the
+# script cd's into the repo root before delegating so running it from another
+# working directory (or via an absolute path) produces the same output.
 
 set -euo pipefail
 
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-KEYWORDS_FILE="${REPO_ROOT}/contracts/destructive_keywords.json"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-if [[ ! -f "${KEYWORDS_FILE}" ]]; then
-  echo "error: ${KEYWORDS_FILE} is missing" >&2
-  exit 1
-fi
+cd "${REPO_ROOT}"
 
-python3 - "${KEYWORDS_FILE}" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-with open(path, encoding="utf-8") as f:
-    data = json.load(f)
-
-if not isinstance(data, list):
-    sys.exit(f"error: {path} must be a JSON array, got {type(data).__name__}")
-
-if len(data) != 14:
-    sys.exit(
-        f"error: {path} must have exactly 14 entries (got {len(data)}); "
-        "expanding this list requires coordinated updates in both the "
-        "runner and synthesizer branches"
-    )
-
-for i, word in enumerate(data):
-    if not isinstance(word, str):
-        sys.exit(f"error: {path}[{i}] is not a string: {word!r}")
-    if not word:
-        sys.exit(f"error: {path}[{i}] is empty")
-    if word != word.lower():
-        sys.exit(f"error: {path}[{i}] must be lowercase: {word!r}")
-
-print(f"ok: {path} has 14 lowercase string entries")
-PY
+exec uv run --package trace-synthesizer python -m synthesizer.check_contracts "$@"

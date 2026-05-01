@@ -12,7 +12,7 @@ dependencies = [
     "anthropic>=0.40",
     "jsonschema>=4.23",
     # Server-Sent Events transport for the synthesizer's question-and-answer
-    # endpoints — see services/synthesizer/synthesizer/api.py.
+    # endpoints — see services/synthesizer/src/synthesizer/api.py.
     "sse-starlette>=2.1",
     "trace-recorder",
     "trace-synthesizer",
@@ -52,14 +52,30 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.isort]
 known-first-party = ["recorder", "synthesizer", "runner", "gateway"]
 
+[tool.ruff.lint.per-file-ignores]
+# draft_prompt.py / revise_prompt.py embed the full LLM system prompts as
+# multi-line strings; prose paragraphs regularly exceed 100 chars and
+# hard-wrapping them would only obscure what the model actually sees.
+# similarity.py contains long descriptive failure messages for snapshot diffs.
+"services/synthesizer/src/synthesizer/draft_prompt.py" = ["E501"]
+"services/synthesizer/src/synthesizer/revise_prompt.py" = ["E501"]
+"services/synthesizer/src/synthesizer/similarity.py" = ["E501"]
+# Stage-1 merge: a number of runner test files now embed canonical
+# notes_daily params (`{"note_template": "- [ ] focus block\n"}`) inline
+# inside JSON request bodies that already had ``"skill_slug": "notes_daily"``.
+# Wrapping each call site would obscure the test intent; allow long lines
+# in the test layer.
+"tests/runner/test_api.py" = ["E501"]
+"tests/runner/test_e2e_fake.py" = ["E501"]
+"tests/runner/test_budget_config.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.11"
 strict = true
 files = ["services", "gateway"]
-# All three module branches use a src/ layout for their packages, except
-# the synthesizer in this branch which is still a flat layout (services/synthesizer/synthesizer).
-# mypy_path lets type-checks resolve `recorder`, `runner`, and `synthesizer`.
-mypy_path = "services/recorder/src:services/runner/src:services/synthesizer"
+# All three modules now use a src/ layout for their packages.
+# mypy_path lets the type checker resolve the in-tree packages.
+mypy_path = "services/recorder/src:services/synthesizer/src:services/runner/src"
 explicit_package_bases = true
 
 [[tool.mypy.overrides]]
@@ -77,7 +93,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["services/runner/src", "services/synthesizer"]
+pythonpath = ["services/recorder/src", "services/synthesizer/src", "services/runner/src"]
 markers = [
     "macos: integration tests that require a real macOS host with Accessibility/Input Monitoring permissions granted; skipped by default off-darwin or without permissions.",
     "uses_lsappinfo: tests that exercise the ``lsappinfo`` frontmost-app helper directly and opt out of the module-level stub that otherwise forces it to return None.",

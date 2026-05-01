@@ -204,11 +204,12 @@ def _build_executor(
 
 def _skill_params(slug: str) -> dict[str, str]:
     return {
-        "gmail_reply": {"sender": "alice@example.com", "template": "Thanks!"},
+        "gmail_reply": {"recipient_name": "Alice", "reply_body": "Thanks!"},
         "calendar_block": {},
         "finder_organize": {},
         "slack_status": {},
-        "notes_daily": {},
+        # Canonical notes_daily declares ``note_template`` as required.
+        "notes_daily": {"note_template": "- [ ] focus block\n"},
     }[slug]
 
 

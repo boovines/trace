@@ -428,7 +428,7 @@ async def test_per_run_cap_triggers_budget_exceeded(
 ) -> None:
     resp = await client_with_low_caps.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     assert resp.status_code == 200
     run_id = resp.json()["run_id"]
@@ -507,7 +507,7 @@ async def test_daily_cap_hit_returns_429_on_start(
 ) -> None:
     resp = await client_with_daily_cap_hit.post(
         "/run/start",
-        json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+        json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
     )
     assert resp.status_code == 429
     assert "daily runner cost cap" in resp.json()["detail"]
@@ -576,7 +576,7 @@ async def test_per_run_80pct_warning_fires_once(
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         resp = await c.post(
             "/run/start",
-            json={"skill_slug": "notes_daily", "parameters": {}, "mode": "dry_run"},
+            json={"skill_slug": "notes_daily", "parameters": {"note_template": "- [ ] focus block\n"}, "mode": "dry_run"},
         )
         assert resp.status_code == 200
         run_id = resp.json()["run_id"]

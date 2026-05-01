@@ -32,14 +32,45 @@ from typing import Any, Final
 from jsonschema import Draft202012Validator
 from jsonschema import ValidationError as JSONSchemaValidationError
 
-from synthesizer.schema import SkillMetaMismatchError, validate_meta_against_markdown
+# Synth's API drifted between when the runner branch was written and the
+# canonical synth merged into main: ``SkillStep`` was renamed to ``Step``,
+# ``SkillMarkdownError`` was renamed to ``SkillParseError``,
+# ``SkillMetaMismatchError`` collapsed into ``jsonschema.ValidationError``,
+# the helper ``replace_step_text`` went away in favour of pydantic v2's
+# native ``model_copy(update=...)``, and ``validate_meta_against_markdown``
+# now takes a markdown string instead of a ``ParsedSkill``. Map back to
+# this module's local names so the rest of the file reads unchanged.
+from synthesizer.schema import (
+    ValidationError as SkillMetaMismatchError,
+)
+from synthesizer.schema import (
+    validate_meta_against_markdown as _validate_meta_against_markdown_str,
+)
 from synthesizer.skill_doc import (
     ParsedSkill,
-    SkillMarkdownError,
-    SkillStep,
     parse_skill_md,
-    replace_step_text,
+    render_skill_md,
 )
+from synthesizer.skill_doc import SkillParseError as SkillMarkdownError
+from synthesizer.skill_doc import Step as SkillStep
+
+
+def replace_step_text(step: SkillStep, new_text: str) -> SkillStep:
+    """Return a copy of ``step`` with ``text`` replaced.
+
+    Thin wrapper over pydantic v2's ``model_copy`` to keep the call sites
+    in this file readable. The canonical synth ``Step`` is frozen.
+    """
+    return step.model_copy(update={"text": new_text})
+
+
+def validate_meta_against_markdown(meta: dict[str, Any], parsed: ParsedSkill) -> None:
+    """Adapter so callers can pass a parsed skill directly.
+
+    Canonical synth's validator expects the raw markdown; we render the
+    parsed skill back so the caller can keep its ``parsed_skill`` reference.
+    """
+    _validate_meta_against_markdown_str(meta, render_skill_md(parsed))
 
 _SKILL_META_SCHEMA_PATH: Final[Path] = (
     Path(__file__).resolve().parents[4] / "contracts" / "skill-meta.schema.json"
@@ -228,7 +259,10 @@ def substitute_parameters(
         replace_step_text(step, _substitute_one(step.text, resolved))
         for step in skill.parsed_skill.steps
     ]
-    new_parsed = replace(skill.parsed_skill, steps=tuple(new_steps))
+    # Canonical ``ParsedSkill.steps`` is ``list[Step]`` (was ``tuple`` in the
+    # earlier shape this branch was written against), and ``ParsedSkill`` is
+    # a pydantic BaseModel — use ``model_copy`` instead of ``dataclasses.replace``.
+    new_parsed = skill.parsed_skill.model_copy(update={"steps": new_steps})
     return replace(skill, parsed_skill=new_parsed)
 
 
