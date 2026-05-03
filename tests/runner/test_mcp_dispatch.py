@@ -30,6 +30,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from runner.confirmation import ConfirmationDecision
 from runner.execution_hints import CapabilityRegistry
 from runner.mcp_client import (
     MCPCallDispatcher,
@@ -455,7 +456,7 @@ async def test_pre_execute_dispatches_non_destructive_mcp_step() -> None:
     )
 
     skill_proxy = MagicMock(meta=meta)
-    await executor._pre_execute_mcp_steps(skill_proxy)
+    await executor._pre_execute_mcp_steps(skill_proxy, MagicMock())
 
     assert len(fake.calls) == 1
     server, function, args = fake.calls[0]
@@ -464,8 +465,78 @@ async def test_pre_execute_dispatches_non_destructive_mcp_step() -> None:
     assert 2 in executor._mcp_pre_executions
 
 
+def _wire_confirmation(
+    executor: Any, decision: ConfirmationDecision
+) -> None:
+    """Patch the executor's confirmation-await + screenshot-ref hooks.
+
+    ``_await_decision_or_kill`` is the runner's normal kill-aware
+    decision wait; replacing it short-circuits the test without
+    spinning up the queue. ``_last_screenshot_ref`` is queried by
+    ``_confirm_mcp_destructive`` for the request payload.
+    """
+
+    async def _fake_await() -> ConfirmationDecision:
+        return decision
+
+    executor._await_decision_or_kill = _fake_await
+    executor._last_screenshot_ref = MagicMock(return_value=None)
+
+
 @pytest.mark.asyncio
-async def test_pre_execute_skips_destructive_mcp_step() -> None:
+async def test_pre_execute_dispatches_destructive_after_confirm() -> None:
+    """Step 3c: destructive MCP steps queue confirmation; on confirm,
+    dispatch happens and the step lands in destructive_steps_executed."""
+    fake = _FakeDispatcher(
+        results={
+            ("gmail", "reply_to_thread"): MCPCallResult(
+                ok=True,
+                server="gmail",
+                function="reply_to_thread",
+                content_text="message_id=m1",
+                raw=None,
+            )
+        }
+    )
+    meta = _meta_with_mcp_step(
+        step_number=5,
+        server="gmail",
+        function="reply_to_thread",
+        arguments={"thread_id": "x", "body": "hi"},
+        destructive=True,
+    )
+    registry = CapabilityRegistry(
+        mcp_servers=frozenset({"gmail"}),
+        mcp_functions={"gmail": frozenset({"reply_to_thread"})},
+    )
+    executor = _make_executor_for_mcp(
+        meta=meta,
+        parameters={},
+        dispatcher=fake,
+        registry=registry,
+    )
+    _wire_confirmation(
+        executor,
+        ConfirmationDecision(action="confirm", reason=None),
+    )
+    skill_proxy = MagicMock(meta=meta)
+    skill_proxy.parsed_skill.steps = []  # _find_step_text returns ""
+    abort_decision = await executor._pre_execute_mcp_steps(
+        skill_proxy, MagicMock()
+    )
+
+    assert abort_decision is None
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0:2] == ("gmail", "reply_to_thread")
+    assert 5 in executor._mcp_pre_executions
+    assert 5 in executor._destructive_steps_executed
+    assert executor._confirmation_count == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_execute_aborts_run_on_destructive_decline() -> None:
+    """Step 3c: user aborts the destructive confirmation → caller gets
+    the decision back so the run is finalized as aborted."""
     fake = _FakeDispatcher(results={})
     meta = _meta_with_mcp_step(
         step_number=5,
@@ -484,11 +555,21 @@ async def test_pre_execute_skips_destructive_mcp_step() -> None:
         dispatcher=fake,
         registry=registry,
     )
+    _wire_confirmation(
+        executor,
+        ConfirmationDecision(action="abort", reason="user_abort"),
+    )
     skill_proxy = MagicMock(meta=meta)
-    await executor._pre_execute_mcp_steps(skill_proxy)
+    skill_proxy.parsed_skill.steps = []
+    abort_decision = await executor._pre_execute_mcp_steps(
+        skill_proxy, MagicMock()
+    )
 
+    assert abort_decision is not None
+    assert abort_decision.action == "abort"
     assert fake.calls == []  # never dispatched
     assert 5 not in executor._mcp_pre_executions
+    assert 5 not in executor._destructive_steps_executed
 
 
 @pytest.mark.asyncio
@@ -511,7 +592,7 @@ async def test_pre_execute_skips_when_param_missing() -> None:
         registry=registry,
     )
     skill_proxy = MagicMock(meta=meta)
-    await executor._pre_execute_mcp_steps(skill_proxy)
+    await executor._pre_execute_mcp_steps(skill_proxy, MagicMock())
     assert fake.calls == []
     assert 2 not in executor._mcp_pre_executions
 
@@ -535,7 +616,7 @@ async def test_pre_execute_no_dispatcher_is_noop() -> None:
         registry=registry,
     )
     skill_proxy = MagicMock(meta=meta)
-    await executor._pre_execute_mcp_steps(skill_proxy)
+    await executor._pre_execute_mcp_steps(skill_proxy, MagicMock())
     assert executor._mcp_pre_executions == {}
 
 
@@ -570,7 +651,7 @@ async def test_pre_execute_records_failure_event_on_server_error() -> None:
         registry=registry,
     )
     skill_proxy = MagicMock(meta=meta)
-    await executor._pre_execute_mcp_steps(skill_proxy)
+    await executor._pre_execute_mcp_steps(skill_proxy, MagicMock())
 
     # The failed call should NOT land in pre_executions, but it should
     # be visible as an mcp_failed event on the writer mock.
