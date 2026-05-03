@@ -40,6 +40,7 @@ from recorder.session import (
     SessionNotActiveError,
     SessionSummary,
 )
+from recorder.stats import StatsSummary, compute_summary
 from recorder.storage import (
     default_index_db_path,
     default_trajectories_root,
@@ -53,6 +54,7 @@ __all__ = [
     "configure_state",
     "get_recorder_state",
     "router",
+    "stats_router",
     "trajectories_router",
 ]
 
@@ -306,6 +308,28 @@ def _safe_screenshot_path(root: Path, trajectory_id: str, filename: str) -> Path
 
 router = APIRouter()
 trajectories_router = APIRouter()
+stats_router = APIRouter()
+
+
+@stats_router.get("/stats/summary")
+def get_stats_summary(
+    days: int = 7,
+    state: RecorderState = StateDep,
+) -> StatsSummary:
+    """Daily-usage summary aggregated across the last ``days`` days.
+
+    Returns top apps by focus time, top window titles, hour-of-day activity
+    distribution, and a per-day timeseries of recorded time + event counts.
+    """
+    if days < 1 or days > 365:
+        raise HTTPException(
+            status_code=400, detail="days must be between 1 and 365"
+        )
+    return compute_summary(
+        index_db=state.index_db,
+        trajectories_root=state.root,
+        window_days=days,
+    )
 
 
 @router.post(
