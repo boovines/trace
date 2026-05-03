@@ -182,13 +182,25 @@ Any Ralph iteration must run and pass these before setting `passes: true` on any
 uv run ruff check services/                   # lint
 uv run mypy --strict services/                # type check
 uv run pytest tests/<current-module>/         # module-specific tests
+./scripts/check_fixtures.sh                   # golden SKILL fixtures (< 5 s)
+./scripts/check_contracts.sh                  # cross-module schemas + fixtures (< 10 s)
 
 # Frontend (only on feat/integration branch)
 pnpm --filter app typecheck
 pnpm --filter app test
 ```
 
+The golden skill fixtures under `fixtures/skills/` are **hand-crafted ground truth** for the synthesizer's similarity tests (S-014, S-017). Ralph iterations must NOT regenerate them from a synthesized draft — see `fixtures/skills/README.md`.
+
 If the current branch is `feat/integration`, also run browser verification via the dev-browser skill for any UI story.
+
+---
+
+## Synthesizer module (Module 2)
+
+The synthesizer's pre-merge gate is the real-API smoke test at `tests/synthesizer/test_real_smoke.py`. It runs `generate_draft` against real Claude Sonnet 4.5 for each of the five reference workflows, scores each result against the hand-crafted golden via Claude Haiku 4.5, and asserts `destructive_match == 1.0` on all five and `overall >= 0.80` on at least four. Total spend is capped at $2 per run (PRD `apiCostBudgetForSmoke`).
+
+The smoke test is gated behind `TRACE_REAL_API_TESTS=1` and is **not** part of the Ralph loop — Ralph emits `SYNTHESIZER_DONE` based on fake-mode tests only. A human runs it before merging `feat/synthesizer` to `main` and attaches `tests/synthesizer/smoke_report.json` to the PR description. See `tests/synthesizer/README.md` for the run command and expected costs.
 
 ---
 
@@ -197,7 +209,7 @@ If the current branch is `feat/integration`, also run browser verification via t
 - **Completion promise per branch:**
   - `feat/recorder`: `RECORDER_DONE`
   - `feat/synthesizer`: `SYNTHESIZER_DONE`
-  - `feat/runner`: `RUNNER_DRY_RUN_DONE`
+  - `feat/runner`: `RUNNER_DRY_RUN_DONE` — emitted when runner stories X-001…X-024 are all `passes:true`. X-025 (human live-execution checklist) does NOT block completion; it blocks PR merge into `main`.
   - `feat/integration`: `INTEGRATION_DONE`
 - **Max iterations per branch:** 40–50. See each branch's `prd.json`.
 - **Environment flag `TRACE_ALLOW_LIVE`**: must never be set during Ralph iterations. The Runner's live paths are gated on it.
@@ -206,6 +218,20 @@ If the current branch is `feat/integration`, also run browser verification via t
   - Patterns that work (e.g., "mypy --strict with PyObjC requires `# type: ignore` on framework imports — document these in service-level AGENTS.md, not here")
   - Gotchas (e.g., "CGEventTap gets disabled under CPU load; always check tap state on every iteration of the run loop")
   - Decisions made that aren't in the PRD
+
+---
+
+## Runner (Module 3) — cross-module notes
+
+The runner branch (`feat/runner`) has shipped its autonomous dry-run phase.
+Cross-module context other branches should know:
+
+- **Service-specific deep dive:** see [services/runner/AGENTS.md](services/runner/AGENTS.md) for the three-layer destructive gate, dry-run vs live mode, common gotchas, test runbook, and the pre-merge live-testing procedure.
+- **Pre-merge gate into `main`:** `tests/runner/live_checklist.md` is a HUMAN-EDITED checklist that must be signed off by a live-execution tester (5 reference skills, disposable accounts, `TRACE_ALLOW_LIVE=1`) before the `feat/runner` → `main` merge. Ralph MUST NOT modify this file. `scripts/check_live_signoff.sh` verifies the sign-off and exits non-zero when missing.
+- **Destructive keywords single source of truth:** `contracts/destructive_keywords.json` (14 locked keywords). Synthesizer and runner MUST both consume this list; neither is allowed to maintain a parallel copy. `services/runner/src/runner/destructive.py` is the reference loader.
+- **SKILL.md format stability:** the synthesizer's `⚠️ ` / `⚠️ [DESTRUCTIVE]` prefix, the `## Steps` section's `N. text` body, and the symmetric `skill.meta.json` `destructive_steps` array are part of the Module-2 → Module-3 contract. Parsers live at `synthesizer.skill_doc` and are consumed unchanged by `runner.skill_loader`.
+- **`run_metadata.json` fields integration should render:** `status`, `mode`, `started_at`/`ended_at`, `total_cost_usd`, `abort_reason`. Specific `abort_reason` literals used by the runner: `per_run_cost_cap`, `incomplete_on_restart`, `kill_switch`, `user_abort`, `user_timeout`, `budget_exceeded:<reason>`, `agent_stuck`. Keep the integration UI's abort-reason parser aware of these exact strings.
+- **WebSocket message types:** runner emits `status_change`, `event`, `turn_complete`, `confirmation_request`, `warning` (with `kind` discriminator, currently only `per_run_cost_80pct`), `done`, `keepalive`. Integration must handle the `warning` type explicitly or it logs an unknown-message error.
 
 ---
 

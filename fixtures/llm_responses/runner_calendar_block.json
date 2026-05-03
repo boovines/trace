@@ -1,0 +1,55 @@
+{
+  "slug": "calendar_block",
+  "marker": "Calendar Block",
+  "description": "Canned multi-turn response for the calendar_block reference workflow. Step 7 (Save) is destructive and triggers <needs_confirmation>.",
+  "turns": [
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 1100,
+      "output_tokens": 40,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_cal_1",
+          "name": "computer",
+          "input": {"action": "screenshot"}
+        }
+      ]
+    },
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 1300,
+      "output_tokens": 42,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_cal_2",
+          "name": "computer",
+          "input": {"action": "left_click", "coordinate": [48, 130]}
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1400,
+      "output_tokens": 24,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Event is filled in; about to save. <needs_confirmation step=\"7\"/>"
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1420,
+      "output_tokens": 14,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Event saved. <workflow_complete/>"
+        }
+      ]
+    }
+  ]
+}

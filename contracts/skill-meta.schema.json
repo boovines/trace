@@ -2,35 +2,154 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://trace.local/contracts/skill-meta.schema.json",
   "title": "SkillMeta",
-  "description": "Shape of skill.meta.json. SKILL.md is the human-readable sibling; this file is the machine-readable one the Runner consumes.",
+  "description": "Machine-readable sibling of SKILL.md. Locked contract once Module 3 (Runner) ships; additionalProperties is deliberately false to catch key typos early.",
   "type": "object",
-  "required": ["slug", "version", "trajectory_ref", "parameters", "destructive_steps", "created_at"],
+  "additionalProperties": false,
+  "required": [
+    "slug",
+    "name",
+    "trajectory_id",
+    "created_at",
+    "parameters",
+    "destructive_steps",
+    "preconditions",
+    "step_count"
+  ],
   "properties": {
-    "slug": { "type": "string", "pattern": "^[a-z0-9_]+$" },
-    "version": { "type": "string" },
-    "trajectory_ref": { "type": "string", "description": "UUID of the source trajectory" },
-    "created_at": { "type": "string", "format": "date-time" },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{2,39}$",
+      "description": "URL-and-filesystem-safe identifier, 3-40 chars, starts with a letter."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "description": "Human-readable display name."
+    },
+    "trajectory_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "UUID of the source trajectory this skill was synthesized from."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp of when the skill was written to disk."
+    },
     "parameters": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "type"],
+        "additionalProperties": false,
+        "required": ["name", "type", "required"],
         "properties": {
-          "name": { "type": "string", "pattern": "^[a-z_][a-z0-9_]*$" },
-          "type": { "type": "string", "enum": ["string", "number", "boolean", "date"] },
-          "description": { "type": "string" },
-          "default": {}
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,29}$",
+            "description": "Parameter identifier used in {name} references inside SKILL.md."
+          },
+          "type": {
+            "type": "string",
+            "enum": ["string", "integer", "boolean"]
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "default": {
+            "type": ["string", "integer", "boolean", "null"]
+          }
         }
       }
     },
     "destructive_steps": {
       "type": "array",
       "description": "1-based indices of SKILL.md steps that require confirmation before execution.",
-      "items": { "type": "integer", "minimum": 1 }
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
     },
-    "preview_screenshots": {
+    "preconditions": {
       "type": "array",
-      "items": { "type": "string", "description": "Relative path under preview/" }
+      "items": {
+        "type": "string"
+      }
+    },
+    "step_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "steps": {
+      "type": "array",
+      "description": "Optional per-step execution metadata. Each entry's number aligns with a 1-based step in SKILL.md's ## Steps section. Omitted entries (or an entirely absent steps array) tell the runner to fall through to computer-use for every step. Order independent: the runner indexes by step number.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["number"],
+        "properties": {
+          "number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "intent": {
+            "type": "string",
+            "description": "Short verb-phrase summary of what the step accomplishes (e.g. 'send_email', 'create_event', 'set_status'). Used by the runner to pick a hint when several apply."
+          },
+          "execution_hints": {
+            "type": "array",
+            "description": "Ordered execution candidates from most-preferred to least-preferred. The runner picks the first whose preconditions are satisfiable (MCP connected, browser focused, etc.).",
+            "items": { "$ref": "#/$defs/executionHint" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "executionHint": {
+      "type": "object",
+      "description": "A single execution candidate for one workflow step. The shape varies by tier; each tier-specific field is optional but the runner enforces presence at execution time.",
+      "additionalProperties": false,
+      "required": ["tier"],
+      "properties": {
+        "tier": {
+          "type": "string",
+          "enum": ["mcp", "browser_dom", "computer_use"]
+        },
+        "mcp_server": {
+          "type": "string",
+          "description": "tier=mcp: catalog key from synthesizer.mcp_catalog.MCP_CATALOG."
+        },
+        "function": {
+          "type": "string",
+          "description": "tier=mcp: function name within the named server."
+        },
+        "arguments": {
+          "type": "object",
+          "description": "tier=mcp: argument map. Values may contain {param} substitutions matching declared parameters."
+        },
+        "url_pattern": {
+          "type": "string",
+          "description": "tier=browser_dom: URL the runner should navigate to (or verify) before acting. May contain {param} substitutions."
+        },
+        "selector": {
+          "type": "string",
+          "description": "tier=browser_dom: CSS selector or aria-label for the element to interact with."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["click", "type", "navigate", "scroll", "submit"],
+          "description": "tier=browser_dom: kind of DOM interaction."
+        },
+        "value": {
+          "type": "string",
+          "description": "tier=browser_dom: literal text or URL for the action (e.g. text to type, URL to navigate to). May contain {param} substitutions."
+        },
+        "summary": {
+          "type": "string",
+          "description": "tier=computer_use: human/agent-readable description for pixel-grounded fallback."
+        }
+      }
     }
   }
 }

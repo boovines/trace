@@ -1,0 +1,59 @@
+{
+  "slug": "gmail_reply",
+  "marker": "Gmail Reply",
+  "description": "Canned multi-turn response for the gmail_reply reference workflow. Turn 3 emits <needs_confirmation> for the destructive Send step (step 7). Turn 4 is the post-confirmation completion.",
+  "turns": [
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 1200,
+      "output_tokens": 48,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "I'll start by taking a screenshot to see the current state of the browser."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_gmail_1",
+          "name": "computer",
+          "input": {"action": "screenshot"}
+        }
+      ]
+    },
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 1480,
+      "output_tokens": 36,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_gmail_2",
+          "name": "computer",
+          "input": {"action": "left_click", "coordinate": [512, 96]}
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1520,
+      "output_tokens": 22,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Reply is composed and ready to send. <needs_confirmation step=\"7\"/>"
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1560,
+      "output_tokens": 14,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Send confirmed and delivered. <workflow_complete/>"
+        }
+      ]
+    }
+  ]
+}

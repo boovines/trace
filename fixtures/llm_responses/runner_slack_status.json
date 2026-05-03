@@ -1,0 +1,55 @@
+{
+  "slug": "slack_status",
+  "marker": "Slack Status",
+  "description": "Canned multi-turn response for slack_status. Step 7 is destructive.",
+  "turns": [
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 900,
+      "output_tokens": 34,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_slack_1",
+          "name": "computer",
+          "input": {"action": "screenshot"}
+        }
+      ]
+    },
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 940,
+      "output_tokens": 44,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_slack_2",
+          "name": "computer",
+          "input": {"action": "left_click", "coordinate": [1400, 70]}
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1000,
+      "output_tokens": 20,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Status composed; ready to save. <needs_confirmation step=\"7\"/>"
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1020,
+      "output_tokens": 12,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Status set. <workflow_complete/>"
+        }
+      ]
+    }
+  ]
+}

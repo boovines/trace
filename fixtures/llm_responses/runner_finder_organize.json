@@ -1,0 +1,55 @@
+{
+  "slug": "finder_organize",
+  "marker": "Finder Organize",
+  "description": "Canned multi-turn response for finder_organize. Step 5 is destructive (moves files) and triggers <needs_confirmation>.",
+  "turns": [
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 980,
+      "output_tokens": 38,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_fin_1",
+          "name": "computer",
+          "input": {"action": "screenshot"}
+        }
+      ]
+    },
+    {
+      "stop_reason": "tool_use",
+      "input_tokens": 1020,
+      "output_tokens": 38,
+      "content_blocks": [
+        {
+          "type": "tool_use",
+          "id": "toolu_fin_2",
+          "name": "computer",
+          "input": {"action": "left_click", "coordinate": [220, 52]}
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1080,
+      "output_tokens": 22,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "PDFs selected; ready to move. <needs_confirmation step=\"5\"/>"
+        }
+      ]
+    },
+    {
+      "stop_reason": "end_turn",
+      "input_tokens": 1120,
+      "output_tokens": 12,
+      "content_blocks": [
+        {
+          "type": "text",
+          "text": "Files archived. <workflow_complete/>"
+        }
+      ]
+    }
+  ]
+}
