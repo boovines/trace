@@ -724,6 +724,59 @@ class RunManager:
         """
         return self._kill_switch.kill(run_id, reason="user_abort")
 
+    def list_skills(self) -> list[dict[str, Any]]:
+        """Enumerate skills under ``skills_root`` for the MCP / UI catalog.
+
+        Each entry returns the slug plus the strict-meta fields a caller
+        most likely wants up front (``name``, ``parameters``,
+        ``destructive_steps``, ``preconditions``, ``step_count``).
+        Skills with malformed or missing ``skill.meta.json`` are skipped
+        with a logged warning rather than raising — one broken skill
+        directory can't hide the others from the catalog.
+
+        The list is sorted by slug for deterministic output (used by
+        the Process MCP server's ``list_skills`` tool, which Claude
+        Desktop will paginate through).
+        """
+        import json as _json
+
+        root = self.skills_root
+        if not root.is_dir():
+            return []
+        out: list[dict[str, Any]] = []
+        for child in sorted(root.iterdir()):
+            if not child.is_dir():
+                continue
+            meta_path = child / "skill.meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, _json.JSONDecodeError) as exc:
+                logger.warning(
+                    "list_skills: skipping %s (unreadable meta: %s)",
+                    child.name,
+                    exc,
+                )
+                continue
+            if not isinstance(meta, dict) or meta.get("slug") != child.name:
+                logger.warning(
+                    "list_skills: skipping %s (slug mismatch or non-object meta)",
+                    child.name,
+                )
+                continue
+            out.append(
+                {
+                    "slug": meta["slug"],
+                    "name": meta.get("name", meta["slug"]),
+                    "parameters": meta.get("parameters", []),
+                    "destructive_steps": meta.get("destructive_steps", []),
+                    "preconditions": meta.get("preconditions", []),
+                    "step_count": meta.get("step_count", 0),
+                }
+            )
+        return out
+
     def list_runs(
         self,
         *,
