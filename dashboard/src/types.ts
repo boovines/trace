@@ -164,10 +164,22 @@ export interface WSDoneMessage {
   final_metadata: Record<string, unknown>;
 }
 
+// Live JPEG frame captured by the browser_dom tier after each action.
+// ``url`` is the path under the gateway (``/run/RUN_ID/dom_frames/...``)
+// — set ``<img src>`` directly.
+export interface WSDomFrameMessage {
+  type: "dom_frame";
+  run_id: string;
+  seq: number;
+  filename: string;
+  url: string;
+}
+
 export type WSMessage =
   | WSEventMessage
   | WSStatusChangeMessage
   | WSTurnCompleteMessage
   | WSConfirmationRequestMessage
   | WSWarningMessage
-  | WSDoneMessage;
+  | WSDoneMessage
+  | WSDomFrameMessage;

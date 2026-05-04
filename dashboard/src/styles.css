@@ -433,3 +433,103 @@ main {
 .confirm-banner small {
   color: rgba(255, 212, 122, 0.8);
 }
+
+/* Live frame viewer — Browser Agent tab. The runner emits one JPEG
+   per successful browser_dom action; we render the latest in a
+   16:9-ish viewport card with a meta strip below. */
+.frame-viewport {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.frame-img {
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #000;
+}
+
+.frame-meta {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.frame-meta code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+
+/* Tier ribbon — per-step pill grid showing what the runner picked
+   for each meta.steps entry. The pill colour signals the tier. */
+.tier-ribbon {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tier-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.tier-step {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.tier-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--border);
+  color: var(--text);
+}
+
+.tier-mcp {
+  background: #1d3a2a;
+  color: #7fdca5;
+}
+
+.tier-dom {
+  background: #1f2d4a;
+  color: #88baff;
+}
+
+.tier-cu {
+  background: #2a2a2a;
+  color: #b9b9b9;
+}
+
+.tier-other {
+  background: #3a1d1d;
+  color: #ffb4b4;
+}
+
+.tier-flag {
+  color: #ffd47a;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Event log decoration: failed events get a red type chip so the
+   eye picks them out of the timeline at a glance. */
+.event-bad {
+  color: #ffb4b4 !important;
+}

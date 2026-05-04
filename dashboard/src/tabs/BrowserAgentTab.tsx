@@ -1,22 +1,28 @@
-// Browser Agent tab — Step 4.2 commit C scaffolding.
+// Browser Agent tab — Step 4.3 commit B.
 //
-// This commit ships the WebSocket subscription plumbing: pick a run,
-// open a typed subscription to /run/{id}/stream via ``subscribeToRun``,
-// and render the incoming WSMessage list as a chronological log. The
-// real observability surface (per-step tier ribbons, live Playwright
-// frames, DOM action log, MCP timeline, confirmation modal) is the
-// scope of Step 4.3 — but the WS pipe is the foundation everything
-// else hangs off, so it ships here in 4.2.
+// Live observability surface for an active run. The tab subscribes to
+// /run/{run_id}/stream (typed via subscribeToRun) and renders five
+// derived views off the message stream:
 //
-// The tab uses the same hash sub-route convention as Runs: an empty
-// ``rest`` shows the run picker; ``rest`` carrying a run id opens the
-// live view.
+//   - Live frame viewer: latest JPEG from the runner's
+//     dom_frame WS event, served by GET /run/{id}/dom_frames/<file>.
+//   - Tier ribbon: per-step lit pill (MCP / DOM / COMPUTER_USE / NONE)
+//     parsed from the runner's tier_selected events.
+//   - DOM action log: ordered list of browser_dom_* events with the
+//     resolved selector / action / value spelled out.
+//   - MCP call timeline: server.function and content_text response
+//     for each mcp_dispatched / mcp_failed event.
+//   - Full event stream (collapsed by default).
+//
+// Confirmation modal polish + Approve/Decline wiring lands in commit
+// C of this PR / Step 4.4 respectively.
 
 import { useEffect, useMemo, useState } from "react";
 import { fetchRuns } from "../api";
 import type {
   RunSummary,
   WSConfirmationRequestMessage,
+  WSDomFrameMessage,
   WSEventMessage,
   WSMessage,
   WSStatusChangeMessage,
@@ -42,6 +48,7 @@ export function BrowserAgentTab({ rest, setRest }: Props) {
 }
 
 // --- Run picker ---------------------------------------------------------
+// (Unchanged from commit C of 4.2 — kept here so the file is self-contained.)
 
 function RunPicker({ onSelect }: { onSelect: (id: string) => void }) {
   const [rows, setRows] = useState<RunSummary[] | null>(null);
@@ -51,8 +58,6 @@ function RunPicker({ onSelect }: { onSelect: (id: string) => void }) {
     let cancelled = false;
     void (async () => {
       try {
-        // Surface in-progress runs first; the picker is most useful
-        // for live observability of an actively-running workflow.
         const all = await fetchRuns({ limit: 50 });
         if (cancelled) return;
         setRows(all);
@@ -161,6 +166,8 @@ function LiveRunView({ runId, onBack }: LiveViewProps) {
     useState<WSConfirmationRequestMessage | null>(null);
   const [latestStatus, setLatestStatus] =
     useState<WSStatusChangeMessage | null>(null);
+  const [latestFrame, setLatestFrame] =
+    useState<WSDomFrameMessage | null>(null);
 
   useEffect(() => {
     setMessages([]);
@@ -168,6 +175,7 @@ function LiveRunView({ runId, onBack }: LiveViewProps) {
     setWsError(null);
     setConfirmationPending(null);
     setLatestStatus(null);
+    setLatestFrame(null);
 
     const sub = subscribeToRun(runId, {
       onOpen: () => setConnected(true),
@@ -180,6 +188,8 @@ function LiveRunView({ runId, onBack }: LiveViewProps) {
           setConfirmationPending(msg);
         } else if (msg.type === "done") {
           setConfirmationPending(null);
+        } else if (msg.type === "dom_frame") {
+          setLatestFrame(msg);
         }
       },
       onError: (e) => setWsError(e.message),
@@ -236,13 +246,27 @@ function LiveRunView({ runId, onBack }: LiveViewProps) {
         </div>
       )}
       <div className="grid">
+        <div className="card span-2">
+          <h2>Live frame</h2>
+          <LiveFrame frame={latestFrame} />
+        </div>
+        <div className="card span-2">
+          <h2>Tier ribbon</h2>
+          <TierRibbon events={eventMessages} />
+        </div>
+        <div className="card span-2">
+          <h2>DOM actions</h2>
+          <DOMActionLog events={eventMessages} />
+        </div>
+        <div className="card span-2">
+          <h2>MCP calls</h2>
+          <MCPTimeline events={eventMessages} />
+        </div>
         <div className="card span-4">
-          <h2>Event stream ({eventMessages.length})</h2>
+          <h2>Full event stream ({eventMessages.length})</h2>
           {eventMessages.length === 0 ? (
             <div className="empty">
-              {connected
-                ? "Listening — no events yet."
-                : "Connecting…"}
+              {connected ? "Listening — no events yet." : "Connecting…"}
             </div>
           ) : (
             <ul className="event-list">
@@ -261,5 +285,185 @@ function LiveRunView({ runId, onBack }: LiveViewProps) {
         </div>
       </div>
     </>
+  );
+}
+
+// --- Live frame viewer --------------------------------------------------
+
+function LiveFrame({ frame }: { frame: WSDomFrameMessage | null }) {
+  if (frame === null) {
+    return (
+      <div className="empty">
+        No browser_dom frames yet. The runner emits a frame after every
+        successful DOM action.
+      </div>
+    );
+  }
+  return (
+    <div className="frame-viewport">
+      <img
+        src={frame.url}
+        alt={`Frame ${frame.seq}`}
+        className="frame-img"
+      />
+      <div className="frame-meta">
+        frame #{frame.seq} · <code>{frame.filename}</code>
+      </div>
+    </div>
+  );
+}
+
+// --- Tier ribbon --------------------------------------------------------
+
+interface TierEntry {
+  step: number;
+  tier: string;
+  message: string;
+  fellBack: boolean;
+}
+
+const TIER_PILL_CLASS: Record<string, string> = {
+  mcp: "tier-mcp",
+  browser_dom: "tier-dom",
+  computer_use: "tier-cu",
+};
+
+// Parses a tier_selected event's message string into structured form.
+// Message shape (from runner.executor._format_tier_decision):
+//   "step={n} intent={intent} tier={tier}[ synthetic][ details][ (fell_back=true)]"
+// The runner enforces this shape so a brittle string parse is fine
+// here — when the runner changes the format, the dashboard needs to
+// follow.
+function parseTierEvent(evt: WSEventMessage): TierEntry | null {
+  if (evt.event_type !== "tier_selected") return null;
+  const stepMatch = /step=(\d+)/.exec(evt.message);
+  const tierMatch = /tier=([\w<>_]+)/.exec(evt.message);
+  if (!stepMatch || !tierMatch) return null;
+  return {
+    step: Number(stepMatch[1]),
+    tier: tierMatch[1],
+    message: evt.message,
+    fellBack: evt.message.includes("fell_back=true"),
+  };
+}
+
+function TierRibbon({ events }: { events: WSEventMessage[] }) {
+  const entries = useMemo(() => {
+    const seen = new Map<number, TierEntry>();
+    for (const evt of events) {
+      const entry = parseTierEvent(evt);
+      if (entry !== null) {
+        // Last decision per step wins (the runner only emits once per
+        // step today, but defensive against future iterations).
+        seen.set(entry.step, entry);
+      }
+    }
+    return [...seen.values()].sort((a, b) => a.step - b.step);
+  }, [events]);
+
+  if (entries.length === 0) {
+    return (
+      <div className="empty">
+        No tier decisions yet — the runner emits one tier_selected event
+        per step at run start.
+      </div>
+    );
+  }
+  return (
+    <ul className="tier-ribbon">
+      {entries.map((e) => (
+        <li key={e.step} className="tier-row" title={e.message}>
+          <span className="tier-step">step {e.step}</span>
+          <span
+            className={
+              "tier-pill " + (TIER_PILL_CLASS[e.tier] ?? "tier-other")
+            }
+          >
+            {e.tier}
+          </span>
+          {e.fellBack && <span className="tier-flag">fell back</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// --- DOM action log -----------------------------------------------------
+
+const DOM_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "browser_dom_dispatched",
+  "browser_dom_failed",
+  "browser_dom_skipped",
+  "browser_dom_aborted",
+]);
+
+function DOMActionLog({ events }: { events: WSEventMessage[] }) {
+  const rows = useMemo(
+    () => events.filter((e) => DOM_EVENT_TYPES.has(e.event_type)),
+    [events],
+  );
+  if (rows.length === 0) {
+    return (
+      <div className="empty">No DOM actions yet.</div>
+    );
+  }
+  return (
+    <ul className="event-list">
+      {rows.map((e) => (
+        <li key={e.seq} className="event">
+          <span className="event-seq">#{e.seq}</span>
+          <span
+            className={
+              "event-type " + (e.event_type.endsWith("_failed") ? "event-bad" : "")
+            }
+          >
+            {e.event_type.replace("browser_dom_", "")}
+          </span>
+          {e.step_number !== null && (
+            <span className="event-step">step {e.step_number}</span>
+          )}
+          <span className="event-message">{e.message}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+// --- MCP timeline -------------------------------------------------------
+
+const MCP_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "mcp_dispatched",
+  "mcp_failed",
+  "mcp_skipped",
+  "mcp_aborted",
+]);
+
+function MCPTimeline({ events }: { events: WSEventMessage[] }) {
+  const rows = useMemo(
+    () => events.filter((e) => MCP_EVENT_TYPES.has(e.event_type)),
+    [events],
+  );
+  if (rows.length === 0) {
+    return <div className="empty">No MCP calls yet.</div>;
+  }
+  return (
+    <ul className="event-list">
+      {rows.map((e) => (
+        <li key={e.seq} className="event">
+          <span className="event-seq">#{e.seq}</span>
+          <span
+            className={
+              "event-type " + (e.event_type.endsWith("_failed") ? "event-bad" : "")
+            }
+          >
+            {e.event_type.replace("mcp_", "")}
+          </span>
+          {e.step_number !== null && (
+            <span className="event-step">step {e.step_number}</span>
+          )}
+          <span className="event-message">{e.message}</span>
+        </li>
+      ))}
+    </ul>
   );
 }
