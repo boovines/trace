@@ -66,6 +66,12 @@ from typing import Any, Final, cast
 from uuid import UUID
 
 from runner.agent_runtime import AgentResponse, AgentRuntime, Message
+from runner.browser_dom_dispatcher import (
+    BrowserDOMCallError,
+    BrowserDOMDispatcher,
+    BrowserDOMResult,
+    substitute_parameters_in_string,
+)
 from runner.budget import (
     BudgetReason,
     BudgetStatusKind,
@@ -201,6 +207,7 @@ class Executor:
         cost_warning_sink: CostWarningSink | None = None,
         capability_registry: CapabilityRegistry | None = None,
         mcp_dispatcher: MCPCallDispatcher | None = None,
+        browser_dom_dispatcher: BrowserDOMDispatcher | None = None,
     ) -> None:
         self._loaded_skill = loaded_skill
         self._parameters = dict(parameters)
@@ -229,6 +236,13 @@ class Executor:
         # builder. Empty when no dispatcher was supplied or no steps had
         # supported MCP hints.
         self._mcp_pre_executions: dict[int, MCPCallResult] = {}
+        self._browser_dom_dispatcher: BrowserDOMDispatcher | None = (
+            browser_dom_dispatcher
+        )
+        # Same shape as ``_mcp_pre_executions`` — populated by the
+        # browser_dom pre-execution path so the primer-builder can list
+        # which steps the dispatcher already drove.
+        self._browser_dom_pre_executions: dict[int, BrowserDOMResult] = {}
 
         self._event_seq = 0
         self._screenshot_seq = 0
@@ -252,10 +266,15 @@ class Executor:
                 return await self._run_killed_before_start()
 
         try:
-            if self._mcp_dispatcher is not None:
-                async with self._mcp_dispatcher:
-                    return await self._run_body()
-            return await self._run_body()
+            # Both dispatchers are async-context-managed and live for
+            # the run's duration. AsyncExitStack lets us enter whichever
+            # ones are present without nested-if branching.
+            async with contextlib.AsyncExitStack() as stack:
+                if self._mcp_dispatcher is not None:
+                    await stack.enter_async_context(self._mcp_dispatcher)
+                if self._browser_dom_dispatcher is not None:
+                    await stack.enter_async_context(self._browser_dom_dispatcher)
+                return await self._run_body()
         finally:
             if self._kill_switch is not None:
                 self._kill_switch.unregister(self._run_id)
@@ -325,10 +344,26 @@ class Executor:
         if abort_decision is not None:
             return self._finalize_aborted(metadata, abort_decision)
 
+        # Same flow as MCP, but for tier=browser_dom. A step's resolved
+        # tier is exclusive (pick_hint chooses one), so iterating once
+        # per tier never double-dispatches the same step. We do MCP
+        # first because it's the higher-priority tier; either tier's
+        # destructive abort short-circuits the whole run.
+        abort_decision = await self._pre_execute_browser_dom_steps(
+            resolved_skill, metadata
+        )
+        if abort_decision is not None:
+            return self._finalize_aborted(metadata, abort_decision)
+
         messages: list[Message] = []
         primer = self._build_mcp_primer_message(resolved_skill)
         if primer is not None:
             messages.append(primer)
+        browser_dom_primer = self._build_browser_dom_primer_message(
+            resolved_skill
+        )
+        if browser_dom_primer is not None:
+            messages.append(browser_dom_primer)
         try:
             return await self._run_loop(
                 resolved_skill, system_prompt, messages, metadata
@@ -1009,6 +1044,293 @@ class Executor:
             # the context for huge tool outputs. Full content stays in
             # ``self._mcp_pre_executions`` for downstream tools that
             # want it.
+            if len(content) > 1200:
+                content = content[:1200] + "\n...(truncated)"
+            lines.append(content)
+        text = "\n".join(lines)
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": text}],
+        }
+
+    async def _pre_execute_browser_dom_steps(
+        self, resolved_skill: LoadedSkill, metadata: RunMetadata
+    ) -> ConfirmationDecision | None:
+        """Run real Playwright DOM actions for ``tier=browser_dom`` steps.
+
+        Mirror of :meth:`_pre_execute_mcp_steps` for the browser_dom
+        tier. A step's resolved tier is exclusive — :func:`pick_hint`
+        picks one — so this method only acts on steps the resolver
+        already routed to browser_dom; everything else is silently
+        skipped.
+
+        For each browser_dom step:
+
+        * Substitute ``{param}`` references in ``url_pattern`` /
+          ``selector`` / ``value``. A missing parameter logs a
+          ``browser_dom_skipped`` event and falls through to the
+          agent loop (computer_use will pick up the slack).
+        * Non-destructive: dispatch immediately, stash the result for
+          the primer builder.
+        * Destructive: queue a confirmation request and await the
+          user's decision. On confirm, dispatch and increment the
+          destructive-action counter. On abort/kill, return the
+          decision so the caller finalizes the run as ``aborted``.
+        """
+        dispatcher = self._browser_dom_dispatcher
+        if dispatcher is None:
+            return None
+        meta = resolved_skill.meta
+        destructive = set(meta.get("destructive_steps") or [])
+
+        for step_number in iter_step_numbers(meta):
+            decision = pick_hint(
+                step_number=step_number,
+                meta=meta,
+                registry=self._capability_registry,
+            )
+            if (
+                decision.chosen is None
+                or decision.chosen_tier != Tier.BROWSER_DOM
+            ):
+                continue
+
+            action = decision.chosen.get("action")
+            if not isinstance(action, str):
+                self._append_event(
+                    "browser_dom_skipped",
+                    f"step={step_number} malformed browser_dom hint "
+                    f"(missing or non-string `action`)",
+                    step_number=step_number,
+                )
+                continue
+
+            try:
+                resolved_hint = self._resolve_browser_dom_hint(
+                    decision.chosen
+                )
+            except KeyError as exc:
+                self._append_event(
+                    "browser_dom_skipped",
+                    f"step={step_number} missing run parameter "
+                    f"{{{exc.args[0]}}} for browser_dom {action}",
+                    step_number=step_number,
+                )
+                continue
+
+            is_destructive = step_number in destructive
+            if is_destructive:
+                user_decision = await self._confirm_browser_dom_destructive(
+                    metadata=metadata,
+                    step_number=step_number,
+                    resolved_hint=resolved_hint,
+                    skill=resolved_skill,
+                )
+                if user_decision.action != "confirm":
+                    self._append_event(
+                        "browser_dom_aborted",
+                        f"step={step_number} {action} "
+                        f"aborted_by_user reason="
+                        f"{user_decision.reason or USER_ABORT_REASON}",
+                        step_number=step_number,
+                    )
+                    return user_decision
+
+            await self._dispatch_one_browser_dom(
+                step_number=step_number,
+                resolved_hint=resolved_hint,
+                destructive=is_destructive,
+            )
+        return None
+
+    def _resolve_browser_dom_hint(
+        self, hint: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Substitute ``{param}`` references and return a resolved hint dict.
+
+        The dispatcher does its own substitution at dispatch time, but
+        the executor needs the substituted view *first* so the
+        destructive-confirmation request can name the literal target
+        the user is approving. Substituting once here and passing the
+        resolved hint back to the dispatcher with ``parameters={}``
+        means we don't substitute twice — the dispatcher's pass becomes
+        a no-op on already-resolved strings.
+        """
+        out: dict[str, Any] = {"tier": "browser_dom"}
+        for key in ("action", "url_pattern", "selector", "value"):
+            raw = hint.get(key)
+            if isinstance(raw, str):
+                out[key] = substitute_parameters_in_string(raw, self._parameters)
+            elif raw is not None:
+                out[key] = raw
+        return out
+
+    async def _confirm_browser_dom_destructive(
+        self,
+        *,
+        metadata: RunMetadata,
+        step_number: int,
+        resolved_hint: dict[str, Any],
+        skill: LoadedSkill,
+    ) -> ConfirmationDecision:
+        """Push a confirmation request for a destructive browser_dom step.
+
+        Mirrors :meth:`_confirm_mcp_destructive` — same state changes
+        (``awaiting_confirmation`` → ``running``), same counter bumps,
+        same kill-aware decision wait — but the request reason is
+        ``browser_dom_destructive`` and the audit-trail event names
+        the prospective DOM action instead of an MCP function call.
+        """
+        self._current_step = step_number
+        self._max_step_seen = max(self._max_step_seen, step_number)
+        self._confirmation_count += 1
+        action = str(resolved_hint.get("action", "<unknown>"))
+        selector = resolved_hint.get("selector")
+        step_text = _find_step_text(skill, step_number) or (
+            f"browser_dom {action}"
+            + (f" on {selector}" if selector else "")
+        )
+        self._confirmation_queue.push_request(
+            run_id=self._run_id,
+            step_number=step_number,
+            step_text=step_text,
+            screenshot_ref=self._last_screenshot_ref(),
+            destructive_reason="browser_dom_destructive",
+        )
+        # Audit-trail line names every relevant resolved field; long
+        # values are truncated so log lines stay grep-friendly.
+        action_preview = self._format_browser_dom_action(resolved_hint)
+        self._append_event(
+            "confirmation_requested",
+            f"step={step_number} reason=browser_dom_destructive "
+            f"{action_preview}",
+            step_number=step_number,
+        )
+        self._writer.update_status(
+            self._snapshot_metadata("awaiting_confirmation", ended_at=None),
+            status="awaiting_confirmation",
+            confirmation_count=self._confirmation_count,
+        )
+        decision = await self._await_decision_or_kill()
+        if decision.action == "confirm":
+            self._destructive_steps_executed.append(step_number)
+            self._append_event(
+                "confirmed",
+                f"step={step_number} reason=browser_dom_destructive",
+                step_number=step_number,
+            )
+            self._writer.update_status(
+                self._snapshot_metadata("running", ended_at=None),
+                status="running",
+            )
+        return decision
+
+    async def _dispatch_one_browser_dom(
+        self,
+        *,
+        step_number: int,
+        resolved_hint: dict[str, Any],
+        destructive: bool,
+    ) -> None:
+        """Issue a single browser_dom action and record the outcome.
+
+        Mirror of :meth:`_dispatch_one_mcp`. Catches
+        :class:`BrowserDOMCallError` (hint-shape error — unsupported
+        action, missing required field) and logs it as a skip; runtime
+        action failures land as ``browser_dom_failed`` with the error
+        message. Successful dispatches stash the result so the primer
+        builder can name the step in the agent's first user message.
+        """
+        dispatcher = self._browser_dom_dispatcher
+        assert dispatcher is not None  # guarded by caller
+
+        action = str(resolved_hint.get("action", "<unknown>"))
+        marker = " destructive" if destructive else ""
+        try:
+            # Pre-substituted hint + empty params: dispatcher's own
+            # substitution becomes a no-op.
+            result = await dispatcher.dispatch(resolved_hint, parameters={})
+        except BrowserDOMCallError as exc:
+            self._append_event(
+                "browser_dom_skipped",
+                f"step={step_number}{marker} {action} "
+                f"unissuable: {exc.detail}",
+                step_number=step_number,
+            )
+            return
+
+        action_preview = self._format_browser_dom_action(resolved_hint)
+        if result.ok:
+            self._browser_dom_pre_executions[step_number] = result
+            content_preview = (result.content_text or "").strip()
+            if len(content_preview) > 160:
+                content_preview = content_preview[:157] + "..."
+            self._append_event(
+                "browser_dom_dispatched",
+                f"step={step_number}{marker} {action_preview} ok"
+                + (f" → {content_preview}" if content_preview else ""),
+                step_number=step_number,
+            )
+        else:
+            self._append_event(
+                "browser_dom_failed",
+                f"step={step_number}{marker} {action_preview} "
+                f"error: {result.error}",
+                step_number=step_number,
+            )
+
+    @staticmethod
+    def _format_browser_dom_action(hint: dict[str, Any]) -> str:
+        """Compact one-line render of a resolved browser_dom hint."""
+        action = hint.get("action", "<missing>")
+        bits: list[str] = [str(action)]
+        if hint.get("selector"):
+            bits.append(f"selector={hint['selector']!r}")
+        if hint.get("url_pattern"):
+            bits.append(f"url={hint['url_pattern']!r}")
+        if hint.get("value"):
+            value_repr = repr(hint["value"])
+            if len(value_repr) > 80:
+                value_repr = value_repr[:77] + "..."
+            bits.append(f"value={value_repr}")
+        return " ".join(bits)
+
+    def _build_browser_dom_primer_message(
+        self, resolved_skill: LoadedSkill
+    ) -> Message | None:
+        """Build a primer user-message naming browser_dom-pre-executed steps.
+
+        Mirror of :meth:`_build_mcp_primer_message`. Returns ``None``
+        when no steps were pre-executed at the browser_dom tier.
+        Otherwise the agent's first turn sees a directive message
+        listing which steps the dispatcher already drove and what the
+        action was, so the agent skips those steps.
+        """
+        if not self._browser_dom_pre_executions:
+            return None
+        executed = sorted(self._browser_dom_pre_executions)
+        next_step = max(executed) + 1
+        total_steps = int(resolved_skill.meta.get("step_count") or 0)
+        lines: list[str] = [
+            f"Steps {executed} have been pre-executed for you via "
+            f"browser DOM actions. Their results are below — please "
+            f"skip those steps and continue from step {next_step} in "
+            "the SKILL.md."
+        ]
+        if total_steps and next_step > total_steps:
+            lines = [
+                f"Every step in the workflow ({executed}) was pre-executed "
+                "for you via browser DOM actions. Acknowledge completion "
+                "with the workflow-complete signal."
+            ]
+        for step_number in executed:
+            result = self._browser_dom_pre_executions[step_number]
+            content = (result.content_text or "(no content returned)").strip()
+            lines.append("")
+            target = result.selector or result.url or "<unspecified>"
+            lines.append(
+                f"Step {step_number} ({result.action} {target}):"
+            )
             if len(content) > 1200:
                 content = content[:1200] + "\n...(truncated)"
             lines.append(content)
