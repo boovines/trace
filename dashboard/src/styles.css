@@ -252,3 +252,149 @@ main {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.row-clickable {
+  cursor: pointer;
+}
+
+.row-clickable:hover {
+  background: rgba(88, 166, 255, 0.06);
+}
+
+.muted-label {
+  color: var(--muted);
+  font-size: 13px;
+  flex: 1;
+}
+
+.muted-label code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+/* Status pills — one rule per RunStatus value plus a default. Colors
+   tuned to read on the dark panel background. */
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  background: var(--border);
+  color: var(--text);
+}
+
+.pill-running,
+.pill-pending {
+  background: #1f2d4a;
+  color: #88baff;
+}
+
+.pill-awaiting_confirmation {
+  background: #4a3b1f;
+  color: #ffd47a;
+}
+
+.pill-succeeded {
+  background: #1d3a2a;
+  color: #7fdca5;
+}
+
+.pill-failed,
+.pill-budget_exceeded {
+  background: #3a1d1d;
+  color: #ffb4b4;
+}
+
+.pill-aborted {
+  background: #2a2a2a;
+  color: #b9b9b9;
+}
+
+/* Definition list used for run metadata "Key: value" rows. Two-column
+   grid keeps the long values from breaking alignment. */
+.kv {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) 3fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.kv dt {
+  color: var(--muted);
+}
+
+.kv dd {
+  margin: 0;
+}
+
+.kv code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.json-block {
+  margin: 4px 0 0;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.3);
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Event log — compact, monospace-ish columns of the events.jsonl
+   stream. Step badges + type chips align to the left of the message. */
+.event-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 12px;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.event {
+  display: grid;
+  grid-template-columns: 48px 140px 64px 1fr;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  align-items: baseline;
+}
+
+.event:last-child {
+  border-bottom: 0;
+}
+
+.event-seq {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.event-type {
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.event-step {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.event-message {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-word;
+}

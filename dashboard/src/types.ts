@@ -38,3 +38,69 @@ export interface StatsSummary {
   hour_of_day: number[];
   daily: DailyBucket[];
 }
+
+// Runner contracts. Mirror of:
+//   services/runner/src/runner/run_index.py    (RunSummary row shape)
+//   services/runner/src/runner/schema.py       (RunMetadata)
+//   services/runner/src/runner/run_writer.py   (events.jsonl row shape)
+// Stays as plain type aliases — gateway is local + trusted.
+
+export type RunStatus =
+  | "pending"
+  | "running"
+  | "awaiting_confirmation"
+  | "succeeded"
+  | "failed"
+  | "aborted"
+  | "budget_exceeded";
+
+export type RunMode = "dry_run" | "execute";
+
+export interface RunSummary {
+  run_id: string;
+  skill_slug: string;
+  status: RunStatus;
+  mode: RunMode;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  total_cost_usd: number | null;
+}
+
+// ``run_metadata.json`` is richer than RunSummary; we surface the
+// subset the dashboard renders today. The gateway returns the file
+// verbatim so additional fields can be added to ``RunMetadata`` without
+// invalidating this type — `Record<string, unknown>` shape keeps tsc
+// happy on unknown extras.
+export interface RunMetadata {
+  run_id: string;
+  skill_slug: string;
+  status: RunStatus;
+  mode: RunMode;
+  started_at: string | null;
+  ended_at: string | null;
+  parameters: Record<string, string> | null;
+  input_tokens_total: number | null;
+  output_tokens_total: number | null;
+  total_cost_usd: number | null;
+  confirmation_count: number | null;
+  destructive_actions_executed: number[] | null;
+  final_step_reached: number | null;
+  error_message: string | null;
+  abort_reason: string | null;
+}
+
+// One row from ``events.jsonl`` as served by GET /run/{id}/events.
+// Note: the inner event-type field is ``type`` here (matches the
+// runner's RunWriter serialization). The WebSocket stream uses a
+// different envelope where ``type`` names the *envelope* type and
+// ``event_type`` carries this same value — see ``WSEvent`` once that
+// lands in commit C.
+export interface RunEvent {
+  seq: number;
+  type: string;
+  message: string;
+  step_number: number | null;
+  screenshot_ref: string | null;
+  timestamp_ms: number | null;
+}
