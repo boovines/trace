@@ -18,7 +18,7 @@
 // C of this PR / Step 4.4 respectively.
 
 import { useEffect, useMemo, useState } from "react";
-import { fetchRuns } from "../api";
+import { abortRun, confirmRun, fetchRuns } from "../api";
 import type {
   RunSummary,
   WSConfirmationRequestMessage,
@@ -232,18 +232,11 @@ function LiveRunView({ runId, onBack }: LiveViewProps) {
         </div>
       )}
       {confirmationPending && (
-        <div className="confirm-banner">
-          <strong>Confirmation requested</strong> · step{" "}
-          {confirmationPending.step_number} ·{" "}
-          {confirmationPending.destructive_reason}
-          <div className="confirm-step-text">
-            {confirmationPending.step_text}
-          </div>
-          <small>
-            Step 4.4 will wire Approve/Decline buttons here against the
-            existing /run/{"{id}"}/confirm endpoint.
-          </small>
-        </div>
+        <ConfirmationModal
+          runId={runId}
+          request={confirmationPending}
+          onResolved={() => setConfirmationPending(null)}
+        />
       )}
       <div className="grid">
         <div className="card span-2">
@@ -465,5 +458,101 @@ function MCPTimeline({ events }: { events: WSEventMessage[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+// --- Confirmation modal -------------------------------------------------
+
+interface ConfirmationModalProps {
+  runId: string;
+  request: WSConfirmationRequestMessage;
+  /** Called once the user's decision has been accepted by the runner.
+   *  The parent component clears its ``confirmationPending`` state on
+   *  this callback so the modal disappears. */
+  onResolved: () => void;
+}
+
+function ConfirmationModal({
+  runId,
+  request,
+  onResolved,
+}: ConfirmationModalProps) {
+  // ``submitting`` blocks both buttons while the POST is in flight so a
+  // double-click can't fire a second decision against an already-resolved
+  // run. ``error`` surfaces network failures inline; the modal stays
+  // open so the user can retry.
+  const [submitting, setSubmitting] =
+    useState<"confirm" | "abort" | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (decision: "confirm" | "abort") => {
+    setSubmitting(decision);
+    setError(null);
+    try {
+      if (decision === "confirm") {
+        await confirmRun(runId, "confirm");
+      } else {
+        // Decline = "abort this destructive step AND stop the run".
+        // We send the abort decision (which finalizes the run as
+        // aborted), then call the kill-switch endpoint as a belt-and-
+        // suspenders — the runner is idempotent on both. Calling
+        // confirm("abort") alone is enough today, but the kill ensures
+        // the run loop tears down within the 2-second SLA even if
+        // something downstream got wedged.
+        await confirmRun(runId, "abort", "user_decline_via_dashboard");
+        try {
+          await abortRun(runId);
+        } catch {
+          // Abort failure isn't fatal — the run is already finalized.
+        }
+      }
+      onResolved();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(null);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true">
+      <div className="modal">
+        <header className="modal-header">
+          <h2>Confirm destructive action</h2>
+          <span className="modal-step">step {request.step_number}</span>
+        </header>
+        <div className="modal-reason">
+          <span className="modal-reason-label">Reason</span>
+          <code>{request.destructive_reason}</code>
+        </div>
+        <div className="modal-step-text">{request.step_text}</div>
+        {request.screenshot_url && (
+          <img
+            src={request.screenshot_url}
+            alt="Pre-action screenshot"
+            className="modal-screenshot"
+          />
+        )}
+        {error && <div className="err">{error}</div>}
+        <div className="modal-actions">
+          <button
+            type="button"
+            className="modal-btn modal-btn-decline"
+            onClick={() => void submit("abort")}
+            disabled={submitting !== null}
+          >
+            {submitting === "abort" ? "Declining…" : "Decline + stop run"}
+          </button>
+          <button
+            type="button"
+            className="modal-btn modal-btn-approve"
+            onClick={() => void submit("confirm")}
+            disabled={submitting !== null}
+          >
+            {submitting === "confirm" ? "Approving…" : "Approve"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
