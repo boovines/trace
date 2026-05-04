@@ -17,6 +17,12 @@ export default defineConfig({
       "/trajectories": "http://127.0.0.1:8765",
       "/recorder": "http://127.0.0.1:8765",
       "/healthz": "http://127.0.0.1:8765",
+      "/runs": "http://127.0.0.1:8765",
+      // The /run prefix needs ws:true so the run stream WebSocket
+      // (/run/{id}/stream) is forwarded too. HTTP routes under /run
+      // (status, start, /run/{id}/{events,confirm,abort,...}) ride
+      // the same proxy entry.
+      "/run": { target: "http://127.0.0.1:8765", ws: true },
     },
   },
   build: {
