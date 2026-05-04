@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -45,12 +45,28 @@ if TYPE_CHECKING:
 
 __all__ = [
     "DEFAULT_ACTION_TIMEOUT_MS",
+    "DEFAULT_FRAME_JPEG_QUALITY",
     "BrowserDOMCallError",
     "BrowserDOMDispatcher",
     "BrowserDOMResult",
+    "FrameSink",
     "PageLike",
     "substitute_parameters_in_string",
 ]
+
+#: JPEG quality for live-stream frames captured after each action. 70
+#: keeps the file size around 60-100 KB at typical 1280-wide viewports
+#: while staying readable; the dashboard's live-frame card downscales
+#: anyway. Tunable via ``BrowserDOMDispatcher`` constructor if a future
+#: caller wants higher fidelity (e.g. an offline replay tool).
+DEFAULT_FRAME_JPEG_QUALITY: int = 70
+
+#: Callback the dispatcher invokes with the latest action's screenshot
+#: bytes (always JPEG). The ``BrowserDOMDispatcher`` itself never
+#: writes to disk or broadcasts events — that's the executor's
+#: responsibility through this sink so the dispatcher stays unaware of
+#: the run-writer / event-broadcaster layering.
+FrameSink = Callable[[bytes], Awaitable[None]]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -166,6 +182,14 @@ class PageLike(Protocol):
 
     async def title(self) -> str: ...
 
+    async def screenshot(
+        self,
+        *,
+        type: str = ...,
+        quality: int | None = ...,
+        full_page: bool = ...,
+    ) -> bytes: ...
+
 
 class BrowserDOMDispatcher:
     """Long-lived browser state for in-run DOM actions.
@@ -195,14 +219,20 @@ class BrowserDOMDispatcher:
         capability: BrowserDOMCapability,
         *,
         action_timeout_ms: int = DEFAULT_ACTION_TIMEOUT_MS,
-        page_provider: (
-            PageProvider | None
-        ) = None,
+        page_provider: PageProvider | None = None,
+        on_frame: FrameSink | None = None,
+        frame_jpeg_quality: int = DEFAULT_FRAME_JPEG_QUALITY,
     ) -> None:
         self._capability = capability
         self._action_timeout_ms = action_timeout_ms
         self._page_provider = page_provider
         self._page: PageLike | None = None
+        # When ``on_frame`` is set, a JPEG of the page is captured
+        # after every successful action and handed off via the sink.
+        # Capture failures never abort the dispatch — frame capture is
+        # observability, the action result is what the run depends on.
+        self._on_frame = on_frame
+        self._frame_jpeg_quality = frame_jpeg_quality
         # Real-Playwright teardown stack — populated only when no
         # page_provider override is set (production path).
         self._teardown_stack: list[Any] = []
@@ -341,6 +371,21 @@ class BrowserDOMDispatcher:
                 duration_ms=(time.monotonic() - started) * 1000.0,
                 error=f"{type(exc).__name__}: {exc}",
             )
+
+        # Capture a frame for the live-stream dashboard. Wrapped in
+        # try/except because the run shouldn't fail if a screenshot
+        # blip happens (e.g. page context was torn down by a redirect
+        # mid-action). Frame capture is purely observability.
+        if self._on_frame is not None:
+            try:
+                jpg = await self._page.screenshot(
+                    type="jpeg", quality=self._frame_jpeg_quality
+                )
+                await self._on_frame(jpg)
+            except Exception as exc:
+                LOGGER.warning(
+                    "browser_dom frame capture failed: %s", exc
+                )
 
         return BrowserDOMResult(
             ok=True,

@@ -13,7 +13,7 @@ from typing import Any
 
 from runner.event_stream import EventBroadcaster
 from runner.run_index import RunIndex
-from runner.run_writer import RunWriter
+from runner.run_writer import RunWriter, dom_frame_filename
 from runner.schema import RunMetadata
 
 
@@ -126,6 +126,25 @@ class ObservingRunWriter(RunWriter):
                     "output_tokens": output_tokens,
                 },
             )
+
+    def append_dom_frame(self, jpg_bytes: bytes) -> tuple[int, Path]:
+        seq, dest = super().append_dom_frame(jpg_bytes)
+        # Frames are served by the gateway under
+        # ``/run/{run_id}/dom_frames/{filename}``. Embedding the URL
+        # in the WS event lets the dashboard set ``<img src=...>``
+        # directly without re-deriving the path.
+        filename = dom_frame_filename(seq)
+        self._broadcaster.publish(
+            self.run_id,
+            {
+                "type": "dom_frame",
+                "run_id": self.run_id,
+                "seq": seq,
+                "filename": filename,
+                "url": f"/run/{self.run_id}/dom_frames/{filename}",
+            },
+        )
+        return seq, dest
 
 
 __all__ = ["ObservingRunWriter"]

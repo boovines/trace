@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from runner import paths
-from runner.browser_dom_dispatcher import BrowserDOMDispatcher
+from runner.browser_dom_dispatcher import BrowserDOMDispatcher, FrameSink
 from runner.browser_dom_probe import (
     BrowserDOMCapability,
     probe_browser_dom_sync,
@@ -415,7 +415,9 @@ class RunManager:
             return None
         return MCPCallDispatcher(live)
 
-    def _make_browser_dom_dispatcher(self) -> BrowserDOMDispatcher | None:
+    def _make_browser_dom_dispatcher(
+        self, *, writer: ObservingRunWriter | None = None
+    ) -> BrowserDOMDispatcher | None:
         """Build a fresh BrowserDOMDispatcher for one run, or ``None``.
 
         Returns ``None`` when the registry has no browser_dom
@@ -423,12 +425,34 @@ class RunManager:
         ``$TRACE_CDP_ENDPOINT`` was set, or the probe failed. Mirror
         of :meth:`_make_mcp_dispatcher`: a fresh dispatcher per run so
         per-run browser state can't leak across runs.
+
+        When ``writer`` is supplied, the dispatcher is wired with an
+        ``on_frame`` sink that persists each captured screenshot via
+        :meth:`ObservingRunWriter.append_dom_frame` — which also
+        broadcasts a ``dom_frame`` WS event for the dashboard's live
+        viewport. The sink is dispatched onto a worker thread so a
+        slow disk write never stalls the async dispatch loop.
         """
         self._get_capability_registry()
         registry = self._capability_registry or default_capability_registry()
         if registry.browser_dom_capability is None:
             return None
-        return BrowserDOMDispatcher(registry.browser_dom_capability)
+        on_frame: FrameSink | None = None
+        if writer is not None:
+            captured_writer = writer
+
+            async def _persist_frame(jpg_bytes: bytes) -> None:
+                # to_thread: writer.append_dom_frame fsyncs the file,
+                # which can take 5-15ms per frame on rotational disks.
+                # Off-loop avoids back-pressure on Playwright.
+                await asyncio.to_thread(
+                    captured_writer.append_dom_frame, jpg_bytes
+                )
+
+            on_frame = _persist_frame
+        return BrowserDOMDispatcher(
+            registry.browser_dom_capability, on_frame=on_frame
+        )
 
     def shutdown(self) -> None:
         """Stop the background loop. Idempotent; safe to skip in tests."""
@@ -622,7 +646,9 @@ class RunManager:
             cost_warning_sink=_publish_per_run_warning,
             capability_registry=self._get_capability_registry(),
             mcp_dispatcher=self._make_mcp_dispatcher(),
-            browser_dom_dispatcher=self._make_browser_dom_dispatcher(),
+            browser_dom_dispatcher=self._make_browser_dom_dispatcher(
+                writer=writer
+            ),
         )
 
         async def _run_and_finalize() -> RunMetadata:
@@ -787,6 +813,27 @@ class RunManager:
         candidate = base / filename
         if not candidate.is_file():
             raise RunNotFound(f"screenshot not found: {filename}")
+        return candidate
+
+    def dom_frame_path(self, run_id: str, filename: str) -> Path:
+        """Return the filesystem path for a run's browser_dom frame.
+
+        Mirror of :meth:`screenshot_path` for the ``dom_frames/``
+        subdirectory the BrowserDOMDispatcher fills via
+        :meth:`ObservingRunWriter.append_dom_frame`. Same path-traversal
+        guard. Returns 404 (via :class:`RunNotFound`) when the run's
+        ``dom_frames/`` doesn't exist — a run that never used the
+        browser_dom tier never grows that directory, so absence is
+        normal rather than an error condition the caller should retry.
+        """
+        if "/" in filename or "\\" in filename or filename in ("", ".", ".."):
+            raise RunNotFound(f"invalid dom_frame filename: {filename!r}")
+        base = self.runs_root / run_id / "dom_frames"
+        if not base.is_dir():
+            raise RunNotFound(run_id)
+        candidate = base / filename
+        if not candidate.is_file():
+            raise RunNotFound(f"dom_frame not found: {filename}")
         return candidate
 
 
