@@ -15,11 +15,11 @@ Open the Gmail web client, locate the most recent unread message from a specific
 
 ## Steps
 
-1. Switch focus to Google Chrome and open the Gmail inbox tab.
-2. Locate and open the most recent unread thread from {recipient_name}; confirm the subject line begins with {reply_subject_prefix} once the reply pane opens.
-3. Click the Reply button at the bottom of the open thread to open the compose pane.
-4. Type the reply body into the compose pane: {reply_body}
-5. ⚠️ [DESTRUCTIVE] Click the Send button to send the reply to {recipient_name}.
+1. Switch focus to Google Chrome with the Gmail inbox tab visible (the inbox list takes up the centre column; screenshot 1).
+2. Click the most recent unread thread from {recipient_name} in the inbox list — unread rows are bold and sit near the top of the centre column; confirm the subject line begins with {reply_subject_prefix} once the thread opens (screenshot 3).
+3. Click the **Reply** button below the message body, just above the small reply-style icons row at the bottom of the open thread, to open the compose pane (screenshot 4).
+4. Type the reply body into the compose pane that appears at the bottom of the thread: {reply_body} (screenshot 5).
+5. ⚠️ [DESTRUCTIVE] Click the blue **Send** button at the bottom-left of the compose pane to send the reply to {recipient_name} (screenshot 6).
 
 ## Expected outcome
 

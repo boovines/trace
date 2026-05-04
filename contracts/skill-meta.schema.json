@@ -96,6 +96,11 @@
             "type": "string",
             "description": "Short verb-phrase summary of what the step accomplishes (e.g. 'send_email', 'create_event', 'set_status'). Used by the runner to pick a hint when several apply."
           },
+          "screenshot_ref": {
+            "type": "string",
+            "pattern": "^\\d{4}\\.png$",
+            "description": "Filename of the trajectory keyframe (e.g. '0003.png') the synthesizer's prose grounds against. The runner uses it during computer-use fallback to show the agent the same visual the synth saw — ties spatial language ('the Send button at the bottom-left') to a concrete pixel reference. Optional and additive: omitted entries fall through to the existing prose-only behaviour."
+          },
           "execution_hints": {
             "type": "array",
             "description": "Ordered execution candidates from most-preferred to least-preferred. The runner picks the first whose preconditions are satisfiable (MCP connected, browser focused, etc.).",

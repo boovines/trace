@@ -124,6 +124,7 @@ Rules:
   - Parameter names match `[a-z][a-z0-9_]{0,29}`.
   - Reference parameters inside step text with `{name}` — for example `Click {recipient_email}` — whenever a value in the trajectory plausibly varies between runs.
   - Every `{name}` reference in the markdown MUST correspond to an entry in `meta.parameters` with the same name, and vice versa.
+  - **Spatially ground each step.** When the trajectory provides screenshots, write step prose that names *where* on screen the target lives — e.g. "Click the **Send** button at the bottom-left of the reply pane (visible in screenshot 3)" instead of just "Click Send". Anchor on landmarks the agent can see: app name, pane/panel/sidebar location, button label or aria-label, relative position ("top-right", "below the search bar", "in the third row"). Cite the keyframe by its 1-based index in the screenshots that arrived with this trajectory. Vague prose like "Click the button" is a regression — it gives the pixel-grounded fallback nothing to anchor to.
 
 ## skill.meta.json shape
 
@@ -156,9 +157,12 @@ Each `meta.steps[]` entry shape:
 {
   "number": <1-based step index in ## Steps>,
   "intent": "<short verb_phrase, e.g. send_email, create_event, set_status>",
+  "screenshot_ref": "<NNNN.png>",              // optional: keyframe the prose grounds against
   "execution_hints": [<hint1>, <hint2>, ...]   // most-preferred first
 }
 ```
+
+`screenshot_ref` ties spatially-grounded step prose ("Click the Send button at the bottom-left of the reply pane") to the actual keyframe the synth saw, so the runner's computer-use fallback can show the agent the same visual. Use the filename of the most relevant keyframe from the trajectory (zero-padded `NNNN.png`, e.g. `"0003.png"`). Omit when no screenshot meaningfully grounds the step (e.g. a pure-keyboard step with no visible target).
 
 Execution hint shapes by tier:
 

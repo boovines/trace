@@ -33,6 +33,7 @@
     {
       "number": 2,
       "intent": "find_thread",
+      "screenshot_ref": "0003.png",
       "execution_hints": [
         {
           "tier": "mcp",
@@ -44,13 +45,14 @@
         },
         {
           "tier": "computer_use",
-          "summary": "Click the most recent unread thread from {recipient_name} in the inbox list."
+          "summary": "Click the most recent unread thread from {recipient_name} — bold rows near the top of the centre inbox column."
         }
       ]
     },
     {
       "number": 5,
       "intent": "send_email",
+      "screenshot_ref": "0006.png",
       "execution_hints": [
         {
           "tier": "mcp",
@@ -70,7 +72,7 @@
         },
         {
           "tier": "computer_use",
-          "summary": "Click the Send button at the bottom-left of the reply compose pane."
+          "summary": "Click the blue Send button at the bottom-left of the reply compose pane (the same panel that contains the reply body text)."
         }
       ]
     }
