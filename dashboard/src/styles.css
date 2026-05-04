@@ -55,6 +55,47 @@ header h1 span {
   color: var(--muted);
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.tab:hover {
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.tab-active,
+.tab-active:hover {
+  background: var(--panel);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* Per-tab control row (range selector, refresh, etc.). Replaces the
+   header-level .controls bar from the single-screen layout. */
+.tab-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.tab-controls label {
+  color: var(--muted);
+}
+
 select,
 button {
   background: var(--panel);
