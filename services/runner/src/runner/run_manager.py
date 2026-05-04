@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from runner import paths
+from runner.browser_dom_dispatcher import BrowserDOMDispatcher
 from runner.browser_dom_probe import (
     BrowserDOMCapability,
     probe_browser_dom_sync,
@@ -414,6 +415,21 @@ class RunManager:
             return None
         return MCPCallDispatcher(live)
 
+    def _make_browser_dom_dispatcher(self) -> BrowserDOMDispatcher | None:
+        """Build a fresh BrowserDOMDispatcher for one run, or ``None``.
+
+        Returns ``None`` when the registry has no browser_dom
+        capability — either Chromium isn't installed locally and no
+        ``$TRACE_CDP_ENDPOINT`` was set, or the probe failed. Mirror
+        of :meth:`_make_mcp_dispatcher`: a fresh dispatcher per run so
+        per-run browser state can't leak across runs.
+        """
+        self._get_capability_registry()
+        registry = self._capability_registry or default_capability_registry()
+        if registry.browser_dom_capability is None:
+            return None
+        return BrowserDOMDispatcher(registry.browser_dom_capability)
+
     def shutdown(self) -> None:
         """Stop the background loop. Idempotent; safe to skip in tests."""
         with self._background_lock:
@@ -606,6 +622,7 @@ class RunManager:
             cost_warning_sink=_publish_per_run_warning,
             capability_registry=self._get_capability_registry(),
             mcp_dispatcher=self._make_mcp_dispatcher(),
+            browser_dom_dispatcher=self._make_browser_dom_dispatcher(),
         )
 
         async def _run_and_finalize() -> RunMetadata:
