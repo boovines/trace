@@ -207,6 +207,25 @@ def get_screenshot(
     return FileResponse(path, media_type="image/png")
 
 
+@router.get("/run/{run_id}/dom_frames/{filename}")
+def get_dom_frame(
+    run_id: str, filename: str, request: Request
+) -> FileResponse:
+    """Serve a single ``dom_frames/NNNN.jpg`` written by the browser_dom tier.
+
+    Mirror of :func:`get_screenshot` for the live-stream observability
+    surface in the dashboard's Browser Agent tab. The filename layer
+    enforces path-traversal protection inside ``dom_frame_path``;
+    nothing else here is dynamic.
+    """
+    manager = _run_manager(request)
+    try:
+        path: Path = manager.dom_frame_path(run_id, filename)
+    except RunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return FileResponse(path, media_type="image/jpeg")
+
+
 @router.websocket("/run/{run_id}/stream")
 async def stream_run(websocket: WebSocket, run_id: str) -> None:
     """WebSocket feed of a run's status changes, events, and confirmations.

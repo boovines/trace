@@ -84,6 +84,10 @@ class _FakePage:
         # corresponding method is called. Lets a single test simulate
         # a page that raises on, say, click.
         self.click_side_effect: Any = None
+        # Bytes returned by ``screenshot`` (default: minimal JPEG magic
+        # so frame-sink tests can assert the bytes survive the seam).
+        self.screenshot_bytes: bytes = b"\xff\xd8\xff\xe0fakejpeg"
+        self.screenshot_side_effect: Any = None
 
     async def goto(
         self,
@@ -116,6 +120,24 @@ class _FakePage:
 
     async def title(self) -> str:
         return "fake page"
+
+    async def screenshot(
+        self,
+        *,
+        type: str = "png",
+        quality: int | None = None,
+        full_page: bool = False,
+    ) -> bytes:
+        self.calls.append(
+            (
+                "screenshot",
+                (),
+                {"type": type, "quality": quality, "full_page": full_page},
+            )
+        )
+        if self.screenshot_side_effect is not None:
+            raise self.screenshot_side_effect
+        return self.screenshot_bytes
 
 
 def _provider_for(page: PageLike) -> Any:
@@ -367,3 +389,92 @@ async def test_action_failure_returns_ok_false() -> None:
     assert result.error is not None
     assert "Timeout" in result.error
     assert result.duration_ms >= 0.0
+
+
+# --- on_frame frame-capture sink ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_on_frame_invoked_after_successful_action() -> None:
+    page = _FakePage()
+    page.screenshot_bytes = b"\xff\xd8\xff\xe0captured"
+    captured: list[bytes] = []
+
+    async def _sink(jpg: bytes) -> None:
+        captured.append(jpg)
+
+    dispatcher = BrowserDOMDispatcher(
+        _FAKE_CAPABILITY,
+        page_provider=_provider_for(page),
+        on_frame=_sink,
+    )
+    async with dispatcher:
+        result = await dispatcher.dispatch(
+            {
+                "tier": "browser_dom",
+                "action": "navigate",
+                "value": "https://x/",
+            },
+            parameters={},
+        )
+    assert result.ok is True
+    assert captured == [b"\xff\xd8\xff\xe0captured"]
+    # screenshot() was called with type='jpeg' + the default quality.
+    screenshot_call = next(c for c in page.calls if c[0] == "screenshot")
+    assert screenshot_call[2]["type"] == "jpeg"
+    assert screenshot_call[2]["quality"] == 70
+
+
+@pytest.mark.asyncio
+async def test_on_frame_skipped_when_action_fails() -> None:
+    page = _FakePage()
+    page.click_side_effect = RuntimeError("Timeout")
+    captured: list[bytes] = []
+
+    async def _sink(jpg: bytes) -> None:
+        captured.append(jpg)
+
+    dispatcher = BrowserDOMDispatcher(
+        _FAKE_CAPABILITY,
+        page_provider=_provider_for(page),
+        on_frame=_sink,
+    )
+    async with dispatcher:
+        result = await dispatcher.dispatch(
+            {"tier": "browser_dom", "action": "click", "selector": "x"},
+            parameters={},
+        )
+    assert result.ok is False
+    # Action failed → no frame to capture.
+    assert captured == []
+    assert not any(c[0] == "screenshot" for c in page.calls)
+
+
+@pytest.mark.asyncio
+async def test_on_frame_failure_does_not_propagate() -> None:
+    page = _FakePage()
+    page.screenshot_side_effect = RuntimeError("page closed")
+
+    sink_calls: list[bytes] = []
+
+    async def _sink(jpg: bytes) -> None:
+        sink_calls.append(jpg)
+
+    dispatcher = BrowserDOMDispatcher(
+        _FAKE_CAPABILITY,
+        page_provider=_provider_for(page),
+        on_frame=_sink,
+    )
+    async with dispatcher:
+        result = await dispatcher.dispatch(
+            {
+                "tier": "browser_dom",
+                "action": "navigate",
+                "value": "https://x/",
+            },
+            parameters={},
+        )
+    # Action itself succeeded; capture failure is observability-only
+    # and must not flip ok.
+    assert result.ok is True
+    assert sink_calls == []  # sink never reached because screenshot raised

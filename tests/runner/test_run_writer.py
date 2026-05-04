@@ -280,6 +280,52 @@ def test_write_screenshot_filename_is_zero_padded(tmp_path: Path) -> None:
     assert path.name == "0042.png"
 
 
+# --- append_dom_frame ----------------------------------------------------
+
+# Minimal valid JPEG bytes (1x1 white pixel). 125 bytes — small enough to
+# inline in tests, large enough to round-trip through the writer.
+_MINIMAL_JPEG: bytes = (
+    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    b"\xff\xdb\x00C\x00\x08\x06\x06\x07\x06\x05\x08\x07\x07\x07\t\t\x08\n\x0c"
+    b"\x14\r\x0c\x0b\x0b\x0c\x19\x12\x13\x0f\x14\x1d\x1a\x1f\x1e\x1d\x1a\x1c"
+    b"\x1c $.' \",#\x1c\x1c(7),01444\x1f'9=82<.342\xff\xc0\x00\x0b\x08\x00"
+    b"\x01\x00\x01\x01\x01\x11\x00\xff\xc4\x00\x1f\x00\x00\x01\x05\x01\x01"
+    b"\x01\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x01\x02\x03\x04\x05"
+    b"\x06\x07\x08\t\n\x0b\xff\xc4\x00\xb5\x10\x00\x02\x01\x03\x03\x02\x04"
+    b"\x03\x05\x05\x04\x04\x00\x00\x01}\x01\x02\x03\x00\x04\x11\x05\x12!1A"
+    b'\x06\x13Qa\x07"q\x142\x81\x91\xa1\x08#B\xb1\xc1\x15R\xd1\xf0$3br\x82'
+    b"\xff\xda\x00\x08\x01\x01\x00\x00?\x00\xfb\xd0\xff\xd9"
+)
+
+
+def test_append_dom_frame_writes_jpeg_with_monotonic_seq(tmp_path: Path) -> None:
+    writer, _run_id = _make_writer(tmp_path)
+    seq0, path0 = writer.append_dom_frame(_MINIMAL_JPEG)
+    seq1, path1 = writer.append_dom_frame(_MINIMAL_JPEG)
+    assert (seq0, seq1) == (0, 1)
+    assert path0.name == "0000.jpg"
+    assert path1.name == "0001.jpg"
+    assert path0.read_bytes() == _MINIMAL_JPEG
+
+
+def test_append_dom_frame_creates_dir_lazily(tmp_path: Path) -> None:
+    writer, _run_id = _make_writer(tmp_path)
+    # Constructor must NOT create dom_frames/ — runs that never use the
+    # browser_dom tier shouldn't grow the directory.
+    assert not (writer.run_dir / "dom_frames").exists()
+    writer.append_dom_frame(_MINIMAL_JPEG)
+    assert (writer.run_dir / "dom_frames").is_dir()
+    assert get_run_dir_perms(writer.run_dir / "dom_frames") == 0o700
+
+
+def test_append_dom_frame_rejects_invalid_jpeg(tmp_path: Path) -> None:
+    writer, _run_id = _make_writer(tmp_path)
+    with pytest.raises(ValueError, match="JPEG magic"):
+        writer.append_dom_frame(b"not a jpeg")
+    # No file created on failure.
+    assert not (writer.run_dir / "dom_frames").exists()
+
+
 def test_close_is_idempotent(tmp_path: Path) -> None:
     writer, _run_id = _make_writer(tmp_path)
     writer.close()

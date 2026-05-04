@@ -36,8 +36,10 @@ from runner.run_index import RunIndex
 from runner.schema import RunMetadata
 
 _PNG_MAGIC: Final[bytes] = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC: Final[bytes] = b"\xff\xd8\xff"
 _DIR_PERMS: Final[int] = 0o700
 _SCREENSHOT_DIGITS: Final[int] = 4
+_DOM_FRAME_DIGITS: Final[int] = 4
 
 
 class RunWriter:
@@ -63,6 +65,11 @@ class RunWriter:
         self._mode = mode
         self._run_dir = runs_root / run_id
         self._screenshots_dir = self._run_dir / "screenshots"
+        # ``dom_frames/`` is created lazily on the first ``append_dom_frame``
+        # call so a run that never uses tier=browser_dom never grows it.
+        self._dom_frames_dir = self._run_dir / "dom_frames"
+        self._dom_frames_dir_created = False
+        self._dom_frame_seq = 0
         self._metadata_path = self._run_dir / "run_metadata.json"
         self._events_path = self._run_dir / "events.jsonl"
         self._transcript_path = self._run_dir / "transcript.jsonl"
@@ -214,6 +221,43 @@ class RunWriter:
             os.fsync(fh.fileno())
         return dest
 
+    def append_dom_frame(self, jpg_bytes: bytes) -> tuple[int, Path]:
+        """Append a JPEG frame to ``dom_frames/`` and return ``(seq, path)``.
+
+        Used by the browser_dom tier's live-stream observability path:
+        the dispatcher captures a frame after every successful action,
+        the executor / observing writer feeds the bytes here, and the
+        gateway serves the resulting file via
+        ``GET /run/{run_id}/dom_frames/{filename}``.
+
+        Sequence numbers are assigned monotonically per writer
+        instance, so the dashboard can render a deterministic ordering
+        without consulting filesystem timestamps. The ``dom_frames/``
+        subdirectory is created lazily on the first frame so runs
+        that never use the browser_dom tier never accumulate the
+        empty dir.
+        """
+        if not isinstance(jpg_bytes, (bytes, bytearray)):  # pragma: no cover
+            raise TypeError("jpg_bytes must be bytes")
+        if not jpg_bytes.startswith(_JPEG_MAGIC):
+            raise ValueError(
+                "dom frame bytes do not start with the JPEG magic signature "
+                "(FF D8 FF); refusing to persist corrupt image"
+            )
+        with self._lock:
+            if not self._dom_frames_dir_created:
+                self._dom_frames_dir.mkdir(parents=True, exist_ok=True)
+                os.chmod(self._dom_frames_dir, _DIR_PERMS)
+                self._dom_frames_dir_created = True
+            seq = self._dom_frame_seq
+            self._dom_frame_seq += 1
+            dest = self._dom_frames_dir / _dom_frame_filename(seq)
+            with dest.open("wb") as fh:
+                fh.write(jpg_bytes)
+                fh.flush()
+                os.fsync(fh.fileno())
+        return seq, dest
+
     def close(self) -> None:
         """Mark the writer closed. Idempotent."""
         with self._lock:
@@ -269,6 +313,20 @@ def _atomic_write_bytes(dest: Path, data: bytes) -> None:
 
 def _screenshot_filename(seq: int) -> str:
     return f"{seq:0{_SCREENSHOT_DIGITS}d}.png"
+
+
+def _dom_frame_filename(seq: int) -> str:
+    return f"{seq:0{_DOM_FRAME_DIGITS}d}.jpg"
+
+
+def dom_frame_filename(seq: int) -> str:
+    """Public: ``NNNN.jpg`` filename for a DOM frame seq.
+
+    Exposed so the observing writer's WS broadcast and the gateway's
+    file-serving route can construct the same canonical filename
+    without duplicating the format string.
+    """
+    return _dom_frame_filename(seq)
 
 
 def _hex_or_dashed(run_id: str) -> str:

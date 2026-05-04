@@ -583,6 +583,88 @@ async def test_get_screenshot_missing_returns_404(
     assert resp.status_code == 404
 
 
+# ---------- dom_frames ----------
+
+
+async def test_get_dom_frame_serves_jpeg(
+    runs_root: Path, client: AsyncClient
+) -> None:
+    """The browser_dom tier writes JPEGs into ``dom_frames/``; the
+    gateway route serves them with image/jpeg content-type. Drop a
+    fake frame on disk for an existing run and assert the route
+    finds it.
+    """
+    resp = await client.post(
+        "/run/start",
+        json={
+            "skill_slug": "notes_daily",
+            "parameters": {"note_template": "- [ ] focus block\n"},
+            "mode": "dry_run",
+        },
+    )
+    run_id = resp.json()["run_id"]
+    manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
+    await manager.get(run_id).task  # type: ignore[union-attr]
+
+    dom_frames = runs_root / run_id / "dom_frames"
+    dom_frames.mkdir(parents=True, exist_ok=True)
+    fake_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00" + b"\x00" * 64
+    (dom_frames / "0000.jpg").write_bytes(fake_jpeg)
+
+    resp = await client.get(f"/run/{run_id}/dom_frames/0000.jpg")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.content == fake_jpeg
+
+
+async def test_get_dom_frame_missing_returns_404(
+    client: AsyncClient,
+) -> None:
+    resp = await client.post(
+        "/run/start",
+        json={
+            "skill_slug": "notes_daily",
+            "parameters": {"note_template": "- [ ] focus block\n"},
+            "mode": "dry_run",
+        },
+    )
+    run_id = resp.json()["run_id"]
+    manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
+    await manager.get(run_id).task  # type: ignore[union-attr]
+
+    # ``dom_frames/`` doesn't exist for runs that never used the tier.
+    resp = await client.get(f"/run/{run_id}/dom_frames/0000.jpg")
+    assert resp.status_code == 404
+
+
+async def test_get_dom_frame_rejects_path_traversal(
+    runs_root: Path, client: AsyncClient
+) -> None:
+    """The path-traversal guard in ``dom_frame_path`` rejects ``..``
+    and ``/``-containing filenames before touching the filesystem.
+    FastAPI normalises some forms in the URL; the guard at the manager
+    layer is the load-bearing check (the route may also 404 first).
+    """
+    resp = await client.post(
+        "/run/start",
+        json={
+            "skill_slug": "notes_daily",
+            "parameters": {"note_template": "- [ ] focus block\n"},
+            "mode": "dry_run",
+        },
+    )
+    run_id = resp.json()["run_id"]
+    manager: RunManager = client.app.state.run_manager  # type: ignore[attr-defined]
+    await manager.get(run_id).task  # type: ignore[union-attr]
+
+    # Direct call to the guard at the manager layer — bypasses any
+    # URL normalisation FastAPI may do upstream.
+    from runner.run_manager import RunNotFound
+
+    with pytest.raises(RunNotFound, match="invalid dom_frame filename"):
+        manager.dom_frame_path(run_id, "..")
+
+
 # ---------- WebSocket ----------
 
 
