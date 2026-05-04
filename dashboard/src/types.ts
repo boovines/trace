@@ -104,3 +104,70 @@ export interface RunEvent {
   screenshot_ref: string | null;
   timestamp_ms: number | null;
 }
+
+// WebSocket envelope shapes broadcast by the runner over
+// /run/{run_id}/stream. Source of truth:
+//   services/runner/src/runner/observing_writer.py   (event, status_change, turn_complete)
+//   services/runner/src/runner/run_manager.py        (warning, done, status_change on crash)
+//   services/runner/src/runner/confirmation.py       (confirmation_request)
+//
+// Note the asymmetry vs RunEvent: the WS envelope's outer ``type``
+// names the *envelope* kind (event / status_change / ...), and the
+// inner event type — when an envelope wraps an events.jsonl row —
+// rides on ``event_type``.
+
+export interface WSEventMessage {
+  type: "event";
+  run_id: string;
+  seq: number;
+  event_type: string;
+  message: string;
+  step_number: number | null;
+  screenshot_ref: string | null;
+}
+
+export interface WSStatusChangeMessage {
+  type: "status_change";
+  run_id: string;
+  status: RunStatus;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WSTurnCompleteMessage {
+  type: "turn_complete";
+  run_id: string;
+  turn_number: number;
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface WSConfirmationRequestMessage {
+  type: "confirmation_request";
+  run_id: string;
+  step_number: number;
+  step_text: string;
+  destructive_reason: string;
+  screenshot_url: string | null;
+}
+
+export interface WSWarningMessage {
+  type: "warning";
+  run_id: string;
+  kind: string;
+  cost_usd?: number;
+  cap_usd?: number;
+}
+
+export interface WSDoneMessage {
+  type: "done";
+  run_id: string;
+  final_metadata: Record<string, unknown>;
+}
+
+export type WSMessage =
+  | WSEventMessage
+  | WSStatusChangeMessage
+  | WSTurnCompleteMessage
+  | WSConfirmationRequestMessage
+  | WSWarningMessage
+  | WSDoneMessage;

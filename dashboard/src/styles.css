@@ -398,3 +398,38 @@ main {
   font-size: 11px;
   word-break: break-word;
 }
+
+/* Live-stream connection indicator on the Browser Agent tab. */
+.ws-on {
+  color: #7fdca5;
+  font-weight: 500;
+}
+
+.ws-off {
+  color: var(--muted);
+}
+
+/* Confirmation banner: visually distinct from .err so the user
+   doesn't read it as a failure. The 4.4 PR will hang Approve /
+   Decline buttons off this same element. */
+.confirm-banner {
+  background: #4a3b1f;
+  border: 1px solid #ffd47a;
+  color: #ffd47a;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 13px;
+}
+
+.confirm-step-text {
+  margin: 6px 0;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.confirm-banner small {
+  color: rgba(255, 212, 122, 0.8);
+}
