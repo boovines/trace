@@ -166,6 +166,7 @@ def _build_session(
     ax_target: dict[str, Any] | None = None,
     ax_raises: bool = False,
     keyframe_policy: KeyframePolicy | None = None,
+    browser_context_resolver: Any = None,
 ) -> tuple[RecordingSession, dict[str, Any]]:
     """Build a session with fakes and return `(session, bag)` for assertions."""
     bag: dict[str, Any] = {}
@@ -214,6 +215,7 @@ def _build_session(
         text_aggregator_factory=text_aggregator_factory,
         permissions_check=permissions_check,
         ax_resolver=ax_resolver,
+        browser_context_resolver=browser_context_resolver,
         screenshot_capturer=screenshot_capturer,
         display_info_provider=display_info_provider,
         keyframe_policy=keyframe_policy,
@@ -363,6 +365,168 @@ def test_click_emits_pre_resolve_and_post_envelope(tmp_path: Path) -> None:
     # Both screenshot files written.
     for seq in (1, 3):
         assert (tmp_path / trajectory_id / "screenshots" / f"{seq:04d}.png").is_file()
+
+
+def test_click_attaches_browser_context_in_chrome(tmp_path: Path) -> None:
+    """Step 6.1: a click while the frontmost app is a known browser
+    bundle picks up the active tab's url+title."""
+    captured_calls: list[str | None] = []
+
+    def fake_resolver(bundle_id: str | None) -> dict[str, Any] | None:
+        captured_calls.append(bundle_id)
+        return {"url": "https://mail.google.com/inbox", "title": "Inbox"}
+
+    session, bag = _build_session(
+        tmp_path,
+        keyframe_policy=_no_periodic_policy(),
+        browser_context_resolver=fake_resolver,
+    )
+    trajectory_id = session.start("demo")
+    bag["focus_tracker"].current_app = {
+        "bundle_id": "com.google.Chrome",
+        "name": "Google Chrome",
+        "pid": 4242,
+    }
+    try:
+        bag["event_tap"].fire(
+            {
+                "cg_event_type": "left_mouse_down",
+                "timestamp_ms": 100,
+                "location_x": 10.0,
+                "location_y": 20.0,
+                "modifiers": [],
+            }
+        )
+    finally:
+        session.stop()
+
+    events = _read_events(tmp_path, trajectory_id)
+    click = next(e for e in events if e["type"] == "click")
+    assert click["browser_context"] == {
+        "url": "https://mail.google.com/inbox",
+        "title": "Inbox",
+    }
+    # Resolver was called once with Chrome's bundle id.
+    assert captured_calls == ["com.google.Chrome"]
+
+
+def test_click_in_non_browser_has_null_browser_context(tmp_path: Path) -> None:
+    """Non-browser apps short-circuit before invoking the resolver,
+    so even with a fake that always returns a context, no capture."""
+    resolver_calls: list[str | None] = []
+
+    def fake_resolver(bundle_id: str | None) -> dict[str, Any] | None:
+        resolver_calls.append(bundle_id)
+        return {"url": "https://should-never-attach.example/", "title": None}
+
+    session, bag = _build_session(
+        tmp_path,
+        keyframe_policy=_no_periodic_policy(),
+        browser_context_resolver=fake_resolver,
+    )
+    trajectory_id = session.start("demo")
+    bag["focus_tracker"].current_app = {
+        "bundle_id": "com.apple.Terminal",
+        "name": "Terminal",
+        "pid": 1,
+    }
+    try:
+        bag["event_tap"].fire(
+            {
+                "cg_event_type": "left_mouse_down",
+                "timestamp_ms": 100,
+                "location_x": 10.0,
+                "location_y": 20.0,
+                "modifiers": [],
+            }
+        )
+    finally:
+        session.stop()
+
+    events = _read_events(tmp_path, trajectory_id)
+    click = next(e for e in events if e["type"] == "click")
+    assert click["browser_context"] is None
+    # is_browser_bundle short-circuited: the resolver was never called.
+    assert resolver_calls == []
+
+
+def test_browser_context_resolver_exception_yields_null(tmp_path: Path) -> None:
+    """A misbehaving resolver must not abort the click hot path —
+    failures fall through to a null browser_context."""
+
+    def fake_resolver(bundle_id: str | None) -> dict[str, Any] | None:
+        raise RuntimeError("boom")
+
+    session, bag = _build_session(
+        tmp_path,
+        keyframe_policy=_no_periodic_policy(),
+        browser_context_resolver=fake_resolver,
+    )
+    trajectory_id = session.start("demo")
+    bag["focus_tracker"].current_app = {
+        "bundle_id": "com.google.Chrome",
+        "name": "Google Chrome",
+        "pid": 4242,
+    }
+    try:
+        bag["event_tap"].fire(
+            {
+                "cg_event_type": "left_mouse_down",
+                "timestamp_ms": 100,
+                "location_x": 10.0,
+                "location_y": 20.0,
+                "modifiers": [],
+            }
+        )
+    finally:
+        session.stop()
+
+    events = _read_events(tmp_path, trajectory_id)
+    click = next(e for e in events if e["type"] == "click")
+    assert click["browser_context"] is None
+
+
+def test_text_input_attaches_browser_context_for_buffered_app(
+    tmp_path: Path,
+) -> None:
+    """text_input attributes to the *buffered-text app*, not the
+    currently-focused app. browser_context must follow the same rule
+    so the URL belongs to the tab that received the keystrokes — not
+    whichever tab is now in front."""
+    seen_bundles: list[str | None] = []
+
+    def fake_resolver(bundle_id: str | None) -> dict[str, Any] | None:
+        seen_bundles.append(bundle_id)
+        return {"url": "https://typed-into-this.example/", "title": "Form"}
+
+    session, bag = _build_session(
+        tmp_path,
+        keyframe_policy=_no_periodic_policy(),
+        browser_context_resolver=fake_resolver,
+    )
+    trajectory_id = session.start("demo")
+    # Frontmost is Chrome, but the buffered text was bound to Safari.
+    bag["focus_tracker"].current_app = {
+        "bundle_id": "com.google.Chrome",
+        "name": "Google Chrome",
+        "pid": 4242,
+    }
+    try:
+        bag["text_aggregator"].fire_text_input(
+            "hello", field_label=None, bundle_id="com.apple.Safari"
+        )
+    finally:
+        session.stop()
+
+    events = _read_events(tmp_path, trajectory_id)
+    typed = next(e for e in events if e["type"] == "text_input")
+    assert typed["browser_context"] == {
+        "url": "https://typed-into-this.example/",
+        "title": "Form",
+    }
+    # The resolver was called with Safari (the buffered-text bundle),
+    # NOT Chrome (current frontmost).
+    assert seen_bundles == ["com.apple.Safari"]
 
 
 def test_ax_resolver_timeout_yields_null_target(tmp_path: Path) -> None:

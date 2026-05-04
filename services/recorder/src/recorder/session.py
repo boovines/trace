@@ -45,6 +45,11 @@ from types import TracebackType
 from typing import Any, TypedDict
 
 from recorder.ax_resolver import ResolvedTarget, resolve_element_at
+from recorder.browser_context import (
+    BrowserContext,
+    is_browser_bundle,
+    resolve_browser_context,
+)
 from recorder.event_tap import EventCallback, EventTap
 from recorder.focus_tracker import (
     AppFocusHistoryEntry,
@@ -119,6 +124,7 @@ FocusTrackerFactory = Callable[[], "FocusTracker"]
 TextAggregatorFactory = Callable[[TextInputEmit], "TextAggregator"]
 PermissionsCheckFn = Callable[[], "PermissionsError | None"]
 AXResolverFn = Callable[[float, float], "ResolvedTarget | None"]
+BrowserContextResolverFn = Callable[[str | None], "BrowserContext | None"]
 ScreenshotFn = Callable[[], "bytes | None"]
 DisplayInfoFn = Callable[[], "DisplayInfo | None"]
 
@@ -208,6 +214,7 @@ class RecordingSession:
         text_aggregator_factory: TextAggregatorFactory | None = None,
         permissions_check: PermissionsCheckFn | None = None,
         ax_resolver: AXResolverFn | None = None,
+        browser_context_resolver: BrowserContextResolverFn | None = None,
         screenshot_capturer: ScreenshotFn | None = None,
         display_info_provider: DisplayInfoFn | None = None,
         keyframe_policy: KeyframePolicy | None = None,
@@ -233,6 +240,15 @@ class RecordingSession:
         )
         self._ax_resolver: AXResolverFn = (
             ax_resolver if ax_resolver is not None else resolve_element_at
+        )
+        # Browser-context capture (Step 6.1). Default resolves via
+        # AppleScript; tests inject a fake. Only invoked when the
+        # frontmost app is in ``KNOWN_BROWSER_BUNDLES`` so non-browser
+        # clicks pay zero cost beyond a frozenset membership check.
+        self._browser_context_resolver: BrowserContextResolverFn = (
+            browser_context_resolver
+            if browser_context_resolver is not None
+            else resolve_browser_context
         )
         self._screenshot_capturer: ScreenshotFn = (
             screenshot_capturer
@@ -581,11 +597,20 @@ class RecordingSession:
         # text_input attributes to the app the buffer was bound to, not
         # whatever happens to be focused right now.
         app_override = self._app_dict_for_bundle(payload["app_bundle_id"])
+        # Capture browser context against the buffered-text app rather
+        # than the (possibly-changed) frontmost app. By the time the
+        # text_input event fires, the user may have already moved on
+        # (focus change is what flushed the buffer); querying the
+        # *recorded* bundle avoids attaching an unrelated tab's URL.
+        browser_context = self._maybe_resolve_browser_context(
+            bundle_id=payload["app_bundle_id"]
+        )
         self._emit_event(
             event_type="text_input",
             payload=schema_payload,
             target=None,
             app=app_override,
+            browser_context=browser_context,
         )
 
     # --------------------------------------------------------- click envelope
@@ -608,7 +633,12 @@ class RecordingSession:
                 logger.exception("ax_resolver raised during click handling")
                 target = None
 
-        # 3. click event
+        # 3. click event — capture browser context when the frontmost
+        #    app is a known browser. The membership check short-circuits
+        #    for non-browser clicks so we never pay the AppleScript
+        #    dispatch cost on unrelated apps.
+        browser_context = self._maybe_resolve_browser_context()
+
         modifiers = _translate_modifiers(event.get("modifiers"))
         click_payload: dict[str, Any] = {"button": button}
         if modifiers:
@@ -617,6 +647,7 @@ class RecordingSession:
             event_type="click",
             payload=click_payload,
             target=target,
+            browser_context=browser_context,
             timestamp_ms=event.get("timestamp_ms"),
         )
 
@@ -783,6 +814,7 @@ class RecordingSession:
         target: ResolvedTarget | None,
         timestamp_ms: int | None = None,
         app: dict[str, Any] | None = None,
+        browser_context: BrowserContext | None = None,
     ) -> None:
         """Append a non-keyframe schema event under the session lock."""
         with self._lock:
@@ -798,6 +830,9 @@ class RecordingSession:
                 "screenshot_ref": None,
                 "app": app if app is not None else self._current_app_dict(),
                 "target": dict(target) if target is not None else None,
+                "browser_context": (
+                    dict(browser_context) if browser_context is not None else None
+                ),
                 "payload": payload,
             }
             try:
@@ -823,6 +858,32 @@ class RecordingSession:
             "name": current["name"],
             "pid": int(current["pid"]),
         }
+
+    def _maybe_resolve_browser_context(
+        self, *, bundle_id: str | None = None
+    ) -> BrowserContext | None:
+        """Capture browser context for ``bundle_id`` (default: current app).
+
+        Short-circuits to ``None`` for non-browser bundles so the
+        AppleScript dispatch is paid only when there's a chance of a
+        useful result. The resolver itself is bounded by its own
+        timeout; we still wrap in try/except so an unexpected failure
+        in the helper never aborts the click hot path.
+        """
+        target_bundle = bundle_id
+        if target_bundle is None:
+            target_bundle = self._current_app_dict().get("bundle_id") or None
+        if not is_browser_bundle(target_bundle):
+            return None
+        try:
+            return self._browser_context_resolver(target_bundle)
+        except Exception:
+            logger.debug(
+                "browser_context_resolver raised for %s",
+                target_bundle,
+                exc_info=True,
+            )
+            return None
 
     def _app_dict_for_bundle(self, bundle_id: str) -> dict[str, Any]:
         """Return an ``app`` dict for ``bundle_id``, falling back to current app."""

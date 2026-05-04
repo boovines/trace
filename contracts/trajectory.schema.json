@@ -44,7 +44,36 @@
             "label": { "type": ["string", "null"] },
             "description": { "type": ["string", "null"] },
             "frame": { "$ref": "#/$defs/frame" },
-            "ax_identifier": { "type": ["string", "null"] }
+            "ax_identifier": { "type": ["string", "null"] },
+            "dom_id": {
+              "type": ["string", "null"],
+              "description": "AXDOMIdentifier when the click landed inside a browser AX tree (Chrome family exposes this; Safari/Firefox vary). Drives Step-4 browser_dom selectors."
+            },
+            "dom_classes": {
+              "oneOf": [
+                {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                { "type": "null" }
+              ],
+              "description": "AXDOMClassList (CSS class tokens) when the click landed inside a browser AX tree. Same provenance as dom_id."
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "browserContext": {
+      "description": "Active-tab URL and title at event time when the frontmost app is a known browser. Captured via AppleScript (Chrome, Safari, Arc, Edge, Brave). Null on non-browser apps or when the query failed/timed out.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "required": ["url"],
+          "properties": {
+            "url": { "type": "string" },
+            "title": { "type": ["string", "null"] }
           },
           "additionalProperties": false
         }
@@ -140,6 +169,7 @@
         },
         "app": { "$ref": "#/$defs/app" },
         "target": { "$ref": "#/$defs/target" },
+        "browser_context": { "$ref": "#/$defs/browserContext" },
         "payload": { "type": "object" }
       },
       "additionalProperties": false
