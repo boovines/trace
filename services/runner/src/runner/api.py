@@ -171,6 +171,20 @@ def abort_run(run_id: str, request: Request = None) -> dict[str, object]:  # typ
     return {"run_id": run_id, "killed": killed, "aborted": True}
 
 
+@router.get("/skills")
+def list_skills(request: Request) -> list[dict[str, Any]]:
+    """Catalog of installed skills.
+
+    Each entry carries the fields the Process MCP server's
+    ``list_skills`` tool — and a future dashboard skill picker —
+    need to render a skill row without a round-trip per slug.
+    Skill directories with malformed meta are skipped (see
+    :meth:`RunManager.list_skills`).
+    """
+    manager = _run_manager(request)
+    return manager.list_skills()
+
+
 @router.get("/runs")
 def list_runs(
     request: Request,
