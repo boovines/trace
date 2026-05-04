@@ -23,7 +23,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from runner.browser_dom_probe import BrowserDOMCapability
 
 __all__ = [
     "CapabilityRegistry",
@@ -56,15 +59,24 @@ class CapabilityRegistry:
     server's actual ``tools/list`` response so the synthesizer can't
     name a tool the live server doesn't actually expose.
 
-    ``browser_dom`` and ``computer_use`` are simple booleans today but
-    kept as named flags so a later step can scope them per target
-    (e.g. browser_dom only when Chrome is the frontmost app).
+    ``browser_dom_capability`` is the populated probe result when
+    Playwright + Chromium are available (or a CDP endpoint is set);
+    ``None`` means the tier is unsupported. Stored as a structured
+    capability rather than a bool so the dispatcher (Step 4.1 commit 2)
+    can read ``cdp_endpoint`` and ``executable_path`` without re-probing.
+    ``computer_use`` is a simple flag — it has no per-target nuance,
+    just a kill-switch for tests that want to force tier=None.
     """
 
     mcp_servers: frozenset[str] = field(default_factory=frozenset)
     mcp_functions: Mapping[str, frozenset[str]] = field(default_factory=dict)
-    browser_dom: bool = False
+    browser_dom_capability: BrowserDOMCapability | None = None
     computer_use: bool = True
+
+    @property
+    def browser_dom(self) -> bool:
+        """Convenience flag: ``True`` when ``tier=browser_dom`` is dispatchable."""
+        return self.browser_dom_capability is not None
 
     def supports(self, hint: Mapping[str, Any]) -> bool:
         """Return True when ``hint`` is dispatchable under this registry.
@@ -166,8 +178,8 @@ def _reason_unsupported(hint: Mapping[str, Any], registry: CapabilityRegistry) -
         return f"mcp {server}.{function} unsupported (no probe data)"
     if tier == Tier.BROWSER_DOM.value:
         return (
-            "browser_dom tier disabled; enable with a Playwright capability "
-            "(planned for Step 4)"
+            "browser_dom tier unavailable; install chromium with "
+            "`uv run playwright install chromium` or set TRACE_CDP_ENDPOINT"
         )
     if tier == Tier.COMPUTER_USE.value:
         return "computer_use tier disabled in this registry"
