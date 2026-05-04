@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import dataclasses
 import logging
 import threading
 import uuid
@@ -32,6 +33,13 @@ from pathlib import Path
 from typing import Any
 
 from runner import paths
+from runner.browser_dom_probe import (
+    BrowserDOMCapability,
+    probe_browser_dom_sync,
+)
+from runner.browser_dom_probe import (
+    format_probe_diagnostic as format_browser_dom_diagnostic,
+)
 from runner.budget import BudgetTracker, RunBudget
 from runner.budget_config import (
     RunnerBudgetConfig,
@@ -261,6 +269,8 @@ class RunManager:
         config_path: Path | None = None,
         capability_registry: CapabilityRegistry | None = None,
         mcp_config_path: Path | None = None,
+        browser_dom_capability: BrowserDOMCapability | None = None,
+        probe_browser_dom: bool = True,
     ) -> None:
         self._runs_root = runs_root
         self._skills_root = skills_root
@@ -274,6 +284,12 @@ class RunManager:
         self._mcp_config_path = mcp_config_path
         self._capability_registry: CapabilityRegistry | None = capability_registry
         self._capability_registry_lock = threading.Lock()
+        # browser_dom probe is short-circuited two ways: a test can pass
+        # ``browser_dom_capability=...`` directly, or set
+        # ``probe_browser_dom=False`` to skip the probe entirely (the
+        # registry will then report tier=browser_dom unsupported).
+        self._browser_dom_capability_override = browser_dom_capability
+        self._probe_browser_dom = probe_browser_dom
         # MCP server configs are loaded lazily alongside the registry
         # probe; the dispatcher (live during a run) needs them to open
         # its own session pool. Cache them so we don't re-read disk per
@@ -293,21 +309,50 @@ class RunManager:
                 self._background = _BackgroundLoop()
             return self._background
 
+    def _probe_browser_dom_capability(self) -> BrowserDOMCapability | None:
+        """Resolve the browser_dom capability for this manager's registry.
+
+        Order of precedence: explicit constructor override → probe
+        disabled (returns ``None``) → live probe via
+        :func:`probe_browser_dom_sync`. Any exception inside the probe
+        is logged and treated as "tier unavailable" — we never let a
+        flaky browser environment block run start.
+        """
+        if self._browser_dom_capability_override is not None:
+            return self._browser_dom_capability_override
+        if not self._probe_browser_dom:
+            return None
+        try:
+            capability = probe_browser_dom_sync()
+        except Exception:
+            logger.exception(
+                "browser_dom probe raised unexpectedly — tier disabled"
+            )
+            return None
+        logger.info(
+            "browser_dom probe: %s",
+            format_browser_dom_diagnostic(capability),
+        )
+        return capability
+
     def _get_capability_registry(self) -> CapabilityRegistry:
-        """Probe MCP servers once and cache the resulting registry.
+        """Probe MCP servers + Chromium once and cache the resulting registry.
 
         First call connects to every server in the configured
         ``mcp_servers.json`` (or ``$TRACE_MCP_CONFIG_PATH``), lists
-        their tools, and caches the populated registry. Subsequent
-        calls reuse the cache so per-run startup cost is constant.
+        their tools, probes the local Chromium install, and caches the
+        populated registry. Subsequent calls reuse the cache so per-run
+        startup cost is constant.
 
-        A broken config is logged but not fatal — we fall back to the
-        conservative default (computer-use only). One bad MCP server
-        likewise just stays out of the registry, see ``mcp_client``.
+        A broken MCP config is logged but not fatal — we fall back to
+        the conservative default (computer-use only) plus whatever the
+        browser_dom probe returned. One bad MCP server likewise just
+        stays out of the registry, see ``mcp_client``.
         """
         with self._capability_registry_lock:
             if self._capability_registry is not None:
                 return self._capability_registry
+            browser_dom_capability = self._probe_browser_dom_capability()
             try:
                 from runner.mcp_client import default_config_path
 
@@ -323,7 +368,10 @@ class RunManager:
                     "computer-use-only registry",
                     exc,
                 )
-                self._capability_registry = default_capability_registry()
+                self._capability_registry = dataclasses.replace(
+                    default_capability_registry(),
+                    browser_dom_capability=browser_dom_capability,
+                )
                 self._mcp_server_configs = []
                 return self._capability_registry
             except Exception:
@@ -331,13 +379,19 @@ class RunManager:
                     "MCP probe raised unexpectedly — falling back to "
                     "computer-use-only registry"
                 )
-                self._capability_registry = default_capability_registry()
+                self._capability_registry = dataclasses.replace(
+                    default_capability_registry(),
+                    browser_dom_capability=browser_dom_capability,
+                )
                 self._mcp_server_configs = []
                 return self._capability_registry
             logger.info(
                 "MCP probe complete:\n%s", format_probe_report(report)
             )
-            self._capability_registry = report.registry
+            self._capability_registry = dataclasses.replace(
+                report.registry,
+                browser_dom_capability=browser_dom_capability,
+            )
             return self._capability_registry
 
     def _make_mcp_dispatcher(self) -> MCPCallDispatcher | None:

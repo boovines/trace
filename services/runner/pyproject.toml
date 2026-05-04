@@ -18,6 +18,7 @@ dependencies = [
     "pyobjc-framework-ApplicationServices>=10.3",
     "websockets>=13",
     "mcp>=1.0",
+    "playwright>=1.40",
 ]
 
 [project.optional-dependencies]

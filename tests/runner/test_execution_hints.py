@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from runner.browser_dom_probe import BrowserDOMCapability
 from runner.execution_hints import (
     CapabilityRegistry,
     HintDecision,
@@ -29,6 +30,10 @@ from runner.execution_hints import (
     extract_step_hints,
     iter_step_numbers,
     pick_hint,
+)
+
+_BROWSER_DOM_AVAILABLE = BrowserDOMCapability(
+    cdp_endpoint=None, executable_path="/fake/chromium"
 )
 
 # --- CapabilityRegistry ---------------------------------------------------
@@ -50,11 +55,13 @@ def test_supports_mcp_only_when_server_in_set() -> None:
 
 
 def test_supports_browser_dom_flag() -> None:
-    on = CapabilityRegistry(browser_dom=True)
-    off = CapabilityRegistry(browser_dom=False)
+    on = CapabilityRegistry(browser_dom_capability=_BROWSER_DOM_AVAILABLE)
+    off = CapabilityRegistry(browser_dom_capability=None)
     hint = {"tier": "browser_dom", "selector": "button.send", "action": "click"}
     assert on.supports(hint) is True
     assert off.supports(hint) is False
+    assert on.browser_dom is True
+    assert off.browser_dom is False
 
 
 def test_supports_computer_use_flag() -> None:
@@ -116,7 +123,10 @@ def test_extract_step_hints_skips_malformed_entries() -> None:
 
 
 def test_pick_hint_chooses_first_supported_mcp() -> None:
-    reg = CapabilityRegistry(mcp_servers=frozenset({"gmail"}), browser_dom=True)
+    reg = CapabilityRegistry(
+        mcp_servers=frozenset({"gmail"}),
+        browser_dom_capability=_BROWSER_DOM_AVAILABLE,
+    )
     meta = _meta_with_steps(
         [
             {
@@ -147,7 +157,7 @@ def test_pick_hint_chooses_first_supported_mcp() -> None:
 
 
 def test_pick_hint_falls_through_when_mcp_server_not_connected() -> None:
-    reg = CapabilityRegistry(mcp_servers=frozenset(), browser_dom=False)
+    reg = CapabilityRegistry(mcp_servers=frozenset(), browser_dom_capability=None)
     meta = _meta_with_steps(
         [
             {
@@ -240,7 +250,10 @@ def test_pick_hint_returns_none_when_computer_use_disabled() -> None:
             Tier.MCP,
         ),
         (
-            CapabilityRegistry(mcp_servers=frozenset(), browser_dom=True),
+            CapabilityRegistry(
+                mcp_servers=frozenset(),
+                browser_dom_capability=_BROWSER_DOM_AVAILABLE,
+            ),
             Tier.BROWSER_DOM,
         ),
         (
