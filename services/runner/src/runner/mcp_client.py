@@ -33,6 +33,7 @@ What this module does NOT do (deferred to Step 3b):
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -325,19 +326,26 @@ def probe_capabilities_sync(
 ) -> MCPProbeReport:
     """Sync wrapper around :func:`probe_capabilities` for non-async callers.
 
-    The :class:`~runner.executor.Executor` itself runs inside an
-    asyncio event loop, so it should call :func:`probe_capabilities`
-    directly. This helper exists for the API layer's startup path and
-    for tests that want a one-shot probe without spinning up their own
-    loop.
+    Runs the async probe on a single-shot worker thread so this helper
+    is safe to call from inside another event loop's call stack — the
+    typical case is :class:`~runner.run_manager.RunManager.start_run`
+    (an async method on the FastAPI loop) calling the sync
+    ``_get_capability_registry`` which calls this. ``asyncio.run``
+    refuses to run on a thread that already has a running loop, hence
+    the deferral to a worker.
     """
-    return asyncio.run(
-        probe_capabilities(
-            configs,
-            config_path=config_path,
-            per_server_timeout=per_server_timeout,
+
+    def _run() -> MCPProbeReport:
+        return asyncio.run(
+            probe_capabilities(
+                configs,
+                config_path=config_path,
+                per_server_timeout=per_server_timeout,
+            )
         )
-    )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(_run).result()
 
 
 # ---------------------------------------------------------------------- utils

@@ -34,6 +34,7 @@ matches the precedent set by :mod:`runner.mcp_client`.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 from dataclasses import dataclass
@@ -184,14 +185,21 @@ def probe_browser_dom_sync(
 ) -> BrowserDOMCapability | None:
     """Sync wrapper around :func:`probe_browser_dom` for non-async callers.
 
-    Mirrors :func:`runner.mcp_client.probe_capabilities_sync`: the
-    run-manager startup path runs outside any event loop, so it gets a
-    sync entry point; the executor itself can call the async form when
-    it's already inside a loop.
+    Mirrors :func:`runner.mcp_client.probe_capabilities_sync`: runs the
+    async probe on a single-shot worker thread so this helper is safe
+    to call from inside another event loop's call stack. The typical
+    case is :class:`~runner.run_manager.RunManager.start_run` (async on
+    the FastAPI loop) calling the sync ``_get_capability_registry``
+    which calls this.
     """
-    return asyncio.run(
-        probe_browser_dom(timeout=timeout, cdp_endpoint=cdp_endpoint)
-    )
+
+    def _run() -> BrowserDOMCapability | None:
+        return asyncio.run(
+            probe_browser_dom(timeout=timeout, cdp_endpoint=cdp_endpoint)
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(_run).result()
 
 
 def format_probe_diagnostic(capability: BrowserDOMCapability | None) -> str:

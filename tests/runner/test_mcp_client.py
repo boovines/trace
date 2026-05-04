@@ -223,6 +223,31 @@ def test_probe_capabilities_sync_runs_event_loop(
     assert report.registry.mcp_servers == frozenset({"gmail"})
 
 
+@pytest.mark.asyncio
+async def test_probe_capabilities_sync_safe_inside_running_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sync wrapper must not blow up when called from inside a loop.
+
+    ``RunManager.start_run`` is async and runs on the FastAPI loop;
+    inside it, ``_get_capability_registry`` (sync) calls this wrapper.
+    A naive ``asyncio.run`` raises RuntimeError in that situation —
+    this test pins the deferred-to-thread fix in place.
+    """
+    from runner.mcp_client import probe_capabilities_sync
+
+    async def _fake(
+        config: MCPServerConfig, timeout: float
+    ) -> frozenset[str] | str:
+        return frozenset({"do_thing"})
+
+    monkeypatch.setattr("runner.mcp_client._probe_single_server", _fake)
+    report = probe_capabilities_sync(
+        configs=[MCPServerConfig(name="gmail", command="x")]
+    )
+    assert report.registry.mcp_servers == frozenset({"gmail"})
+
+
 # --- CapabilityRegistry — function-name filtering after probe -------------
 
 

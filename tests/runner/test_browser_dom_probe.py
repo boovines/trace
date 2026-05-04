@@ -177,6 +177,28 @@ def test_probe_sync_wraps_async(monkeypatch: pytest.MonkeyPatch) -> None:
     assert capability.executable_path == "/fake/chromium"
 
 
+@pytest.mark.asyncio
+async def test_probe_sync_safe_inside_running_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sync wrapper must not blow up when called from inside a loop.
+
+    ``RunManager.start_run`` is async and runs on the FastAPI loop;
+    inside it, ``_get_capability_registry`` (sync) calls this wrapper.
+    A naive ``asyncio.run`` raises RuntimeError in that situation. This
+    test pins the deferred-to-thread fix in place.
+    """
+    monkeypatch.delenv("TRACE_CDP_ENDPOINT", raising=False)
+    monkeypatch.setattr(
+        browser_dom_probe,
+        "_check_playwright_chromium",
+        lambda: ("/fake/chromium", None),
+    )
+    capability = probe_browser_dom_sync()
+    assert capability is not None
+    assert capability.executable_path == "/fake/chromium"
+
+
 # --- format_probe_diagnostic ---------------------------------------------
 
 
