@@ -7,7 +7,7 @@ DIGEST:
 
 OUTPUT:
 {
-  "markdown": "# Send weekly update email\n\nOpens Gmail in Chrome, composes a new message to the team distribution list, and sends it with a subject line.\n\n## Parameters\n\n- `recipient` (string, required) — the destination email address\n- `subject` (string, required) — the email subject line\n\n## Preconditions\n\n- Chrome is installed and Gmail is already signed in\n\n## Steps\n\n1. Switch to Chrome with Gmail open.\n2. Click the Compose button.\n3. Type {recipient} into the To field.\n4. Type {subject} into the Subject field.\n5. ⚠️ [DESTRUCTIVE] Click the Send button to send the email.\n\n## Expected outcome\n\nThe email is delivered to {recipient} with the specified subject line.\n",
+  "markdown": "# Send weekly update email\n\nOpens Gmail in Chrome, composes a new message to the team distribution list, and sends it with a subject line.\n\n## Parameters\n\n- `recipient` (string, required) — the destination email address\n- `subject` (string, required) — the email subject line\n\n## Preconditions\n\n- Chrome is installed and Gmail is already signed in\n\n## Steps\n\n1. Switch focus to Chrome with the Gmail inbox tab visible (screenshot 1).\n2. Click the red **Compose** button in the top-left of the Gmail sidebar (screenshot 2).\n3. Type {recipient} into the **To** field at the top of the compose pane (screenshot 3).\n4. Type {subject} into the **Subject** field directly below the To field (screenshot 4).\n5. ⚠️ [DESTRUCTIVE] Click the blue **Send** button at the bottom-left of the compose pane to send the email (screenshot 5).\n\n## Expected outcome\n\nThe email is delivered to {recipient} with the specified subject line.\n",
   "meta": {
     "slug": "send_weekly_update",
     "name": "Send weekly update email",
@@ -19,7 +19,25 @@ OUTPUT:
     ],
     "destructive_steps": [5],
     "preconditions": ["Chrome is installed and Gmail is already signed in"],
-    "step_count": 5
+    "step_count": 5,
+    "steps": [
+      {
+        "number": 2,
+        "intent": "open_compose",
+        "screenshot_ref": "0002.png",
+        "execution_hints": [
+          {"tier": "computer_use", "summary": "Click the red Compose button in the top-left of the Gmail sidebar."}
+        ]
+      },
+      {
+        "number": 5,
+        "intent": "send_email",
+        "screenshot_ref": "0005.png",
+        "execution_hints": [
+          {"tier": "computer_use", "summary": "Click the blue Send button at the bottom-left of the compose pane."}
+        ]
+      }
+    ]
   },
   "questions": [
     {"id": "q1", "category": "parameterization", "text": "Should the recipient always be team@acme.com, or does it change between runs?"},

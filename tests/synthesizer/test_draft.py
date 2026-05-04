@@ -475,3 +475,23 @@ def test_system_prompt_mentions_required_keys() -> None:
     # Both few-shot examples must be embedded verbatim.
     assert "### Example 1" in DRAFT_SYSTEM_PROMPT
     assert "### Example 2" in DRAFT_SYSTEM_PROMPT
+
+
+def test_system_prompt_demands_spatial_grounding() -> None:
+    """Step 5 contract: the prompt instructs the LLM to write
+    spatially-grounded step prose (so the runner's computer-use
+    fallback gets something to anchor on) and to cite a keyframe via
+    a ``screenshot_ref`` field on ``meta.steps[]``.
+
+    Worded as a content check rather than a regex on a specific phrase
+    so subsequent prompt-wording tweaks don't churn the test, but
+    every load-bearing concept must be named explicitly somewhere.
+    """
+    # Spatial grounding instruction must be present.
+    assert "Spatially ground" in DRAFT_SYSTEM_PROMPT
+    assert "screenshot 3" in DRAFT_SYSTEM_PROMPT  # the canonical example
+    # ``screenshot_ref`` field must be documented on the steps[] entry shape.
+    assert "screenshot_ref" in DRAFT_SYSTEM_PROMPT
+    # A landmark vocabulary cue should be in the instructions so the LLM
+    # has examples of what "anchor on landmarks" means.
+    assert "bottom-left" in DRAFT_SYSTEM_PROMPT

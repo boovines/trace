@@ -310,3 +310,53 @@ def test_unknown_tier_rejected_by_schema() -> None:
     )
     with pytest.raises(SchemaValidationError):
         validate_meta(meta)
+
+
+# --- screenshot_ref (Step 5: synth visual grounding) ----------------------
+
+
+def test_screenshot_ref_accepted_on_step() -> None:
+    meta = _base_meta(
+        with_steps=[
+            {
+                "number": 2,
+                "intent": "open_thread",
+                "screenshot_ref": "0003.png",
+            },
+        ]
+    )
+    validate_meta(meta)
+    validate_meta_against_markdown(meta, _BASE_MD)
+
+
+def test_screenshot_ref_with_wrong_format_rejected() -> None:
+    """The schema enforces the canonical ``NNNN.png`` filename shape so a
+    typo at synth-time fails fast rather than handing the runner an
+    image filename that won't resolve in ``trajectories/<id>/screenshots/``.
+    """
+    meta = _base_meta(
+        with_steps=[
+            {
+                "number": 1,
+                "screenshot_ref": "first-screenshot.jpeg",
+            },
+        ]
+    )
+    with pytest.raises(SchemaValidationError):
+        validate_meta(meta)
+
+
+def test_screenshot_ref_omitted_is_fine() -> None:
+    """``screenshot_ref`` is optional — a step without it falls through
+    to the existing prose-only behaviour."""
+    meta = _base_meta(
+        with_steps=[
+            {
+                "number": 1,
+                "intent": "open_inbox",
+                # no screenshot_ref
+            },
+        ]
+    )
+    validate_meta(meta)
+    validate_meta_against_markdown(meta, _BASE_MD)
